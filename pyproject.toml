@@ -117,3 +117,10 @@ possibly-unresolved-reference = "warn"
 # Top-level `Any` returns from third-party libs (torch tensors, xdsl IR
 # values) are noise at this stage of the project.
 unsupported-base = "warn"
+
+# ---------------------------------------------------------------------------
+# pytest — Python unit tests (https://docs.pytest.org/)
+# Run from repo root (inside the venv): `pytest`
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["test"]
