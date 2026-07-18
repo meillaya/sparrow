@@ -1,0 +1,119 @@
+# pyproject.toml — ForgeStack Phase 1 Python project metadata + tool config.
+#
+# Toolchain (2026-07-18): uv for env/deps, ruff for lint+format, ty for types.
+# See .omo/notepads/forgestack/learnings.md §(d) for the migration rationale.
+[project]
+name = "forgestack"
+version = "0.1.0"
+description = "ForgeStack Phase 1 — xDSL ↔ MLIR ↔ libtorch dialect bridge (vertical slice)"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "ForgeStack contributors" },
+]
+keywords = ["xdsl", "mlir", "torch", "compiler", "dialect"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Compilers",
+]
+# Runtime deps are installed into .venv via `uv pip install` (see
+# scripts/setup-env.sh). Listing them here as well keeps `uv sync` and
+# downstream tools honest about the project's true requirements.
+dependencies = [
+    "torch",
+    "xdsl>=0.68",
+    "numpy",
+    "pybind11",
+    "lit",
+]
+
+[project.optional-dependencies]
+# Phase 1 uses pytest for the Python unit tests and lit for the FileCheck
+# integration tests; both already live in `dependencies` but are also surfaced
+# here for clarity when CI installs just the test subset.
+test = [
+    "pytest",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ---------------------------------------------------------------------------
+# ruff — linter + formatter (https://docs.astral.sh/ruff/)
+# Run from repo root: `ruff check .` / `ruff format --check .`
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+# Keep src lean — Phase 1 only has scripts/ + the eventual python/ tree.
+extend-exclude = [
+    ".venv",
+    "build",
+    "cmake-build-*",
+    ".devenv",
+    ".omo/evidence",
+    ".omx",
+    ".codegraph",
+]
+# `ruff format` style follows Black by default; these overrides keep things
+# readable for a small Phase 1 codebase.
+indent-width = 4
+
+[tool.ruff.lint]
+# Curated rule selection: catch real bugs and obvious smells without piling
+# on stylistic opinions for a 1-week-old codebase.
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (undefined names, unused imports, …)
+    "I",   # isort (import sorting)
+    "B",   # flake8-bugbear (likely bugs)
+    "UP",  # pyupgrade (modernise syntax for the target version)
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific lints
+]
+ignore = [
+    "E501",  # line length — handled by the formatter
+    "B008",  # function call in default argument (common in xdsl fixtures)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["forgestack"]
+
+[tool.ruff.format]
+# Use double quotes (Black-compatible) and a trailing comma on multi-line
+# collections — easier to read in diffs and matches xDSL's own style.
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+skip-magic-trailing-comma = false
+
+# ---------------------------------------------------------------------------
+# ty — Astral's Rust-based type checker (https://docs.astral.sh/ty/)
+# Run from repo root (inside the venv, so ty can resolve torch/xdsl types):
+#   ty check .
+# `ty` auto-discovers `.venv` for third-party imports; no venv-path needed.
+# ---------------------------------------------------------------------------
+[tool.ty]
+# Phase 1 scripts are thin wrappers — strict-by-default but be lenient on
+# unresolved imports in test fixtures and CLI scripts.
+[tool.ty.environment]
+python-version = "3.12"
+# ty expects project sources under src/ by default; Phase 1 keeps code at
+# the repo root (scripts/) so we list it explicitly.
+root = [".", "scripts"]
+
+[tool.ty.rules]
+# Possibly-unresolved-reference fires on dynamic imports (xdsl dialect
+# loading) which are intentional in Phase 1 fixtures. Promote to warn rather
+# than fail so the codebase stays green while the dialect surface grows.
+possibly-unresolved-reference = "warn"
+# Top-level `Any` returns from third-party libs (torch tensors, xdsl IR
+# values) are noise at this stage of the project.
+unsupported-base = "warn"

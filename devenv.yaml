@@ -1,0 +1,4 @@
+# ForgeStack Phase 1 — devenv.sh project config
+inputs:
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixos-unstable
