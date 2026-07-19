@@ -1,8 +1,12 @@
 # lit.cfg.py — ForgeStack compiler/test lit configuration.
 #
-# Runs the FileCheck-driven `.mlir` tests under `compiler/test/Dialect/`
-# and (later) `compiler/test/Conversion/`. Each test file uses `// RUN:`
-# lines to invoke `forge-opt` and pipe its output through FileCheck.
+# Runs the FileCheck-driven `.mlir` tests under `compiler/test/`. The
+# `test_source_root = HERE` setting below makes lit recursively
+# discover every ``.mlir`` file under the test tree — currently
+# ``Dialect/{Graph,Tensor,Schedule}``, ``Conversion/GraphToTensor``,
+# and (Phase 2) ``Transforms/{Canonicalize,ShapeInference,Fuse}``.
+# Each test file uses `// RUN:` lines to invoke `forge-opt` and pipe
+# its output through FileCheck.
 
 # ruff: noqa: F821  (lit injects `config` at load time; F821 is the
 # "undefined name" rule that fires on `config.x = ...` assignments below)
