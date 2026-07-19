@@ -6,7 +6,19 @@ import re
 from collections.abc import Mapping
 from typing import Final
 
-from compiler.lib.Dialect.Astra.microcode import OpCode, decode, encode
+from xdsl.dialects.builtin import IntAttr, IntegerType, UnrealizedConversionCastOp
+from xdsl.ir import Attribute, SSAValue
+
+from . import (
+    ComputeMatmulOp,
+    MemorySpace,
+    MicrocodeDmaLoadOp,
+    MicrocodeDmaStoreOp,
+    MicrocodeMatmulOp,
+    MicrocodeVectorGeluOp,
+    PtrType,
+)
+from .microcode import MicrocodeInstr, OpCode, decode, encode
 
 _FIELD_RE: Final[re.Pattern[str]] = re.compile(r"^(?P<name>[a-zA-Z][a-zA-Z0-9_]*)=(?P<value>.+)$")
 _ADDRESS_RE: Final[re.Pattern[str]] = re.compile(
@@ -146,3 +158,101 @@ def disassemble(words: list[int]) -> str:
                     f"VECTOR_GELU dst={_format_address('SRAM', instr.reg_a)}, src={_format_address('SRAM', instr.reg_b)}, elements={instr.imm}"
                 )
     return "\n".join(lines)
+
+
+type AstraOp = (
+    ComputeMatmulOp
+    | MicrocodeDmaLoadOp
+    | MicrocodeDmaStoreOp
+    | MicrocodeMatmulOp
+    | MicrocodeVectorGeluOp
+)
+
+_DIALECT_MARKER = 0x8000
+_DIALECT_VALUE_MASK = _DIALECT_MARKER - 1
+
+
+def _encode_dialect_op(op: AstraOp) -> int:
+    match op:
+        case ComputeMatmulOp():
+            return encode(
+                OpCode.MATMUL,
+                op.m.data | _DIALECT_MARKER,
+                op.n.data,
+                imm=op.k.data,
+            )
+        case MicrocodeDmaLoadOp():
+            return encode(OpCode.DMA_LOAD, 0, 0, imm=op.bytes.data)
+        case MicrocodeDmaStoreOp():
+            return encode(OpCode.DMA_STORE, 0, 0, imm=op.bytes.data)
+        case MicrocodeMatmulOp():
+            bias_marker = _DIALECT_MARKER if op.bias is not None else 0
+            return encode(
+                OpCode.MATMUL,
+                op.m.data,
+                op.n.data | bias_marker,
+                imm=op.k.data,
+            )
+        case MicrocodeVectorGeluOp():
+            return encode(OpCode.VECTOR_GELU, 0, 0)
+
+
+def assemble_from_dialect(microcode_ops: list[AstraOp]) -> list[int]:
+    """Encode the supported Astra dialect operations in list order."""
+    return [_encode_dialect_op(op) for op in microcode_ops]
+
+
+def _placeholder(attribute: Attribute) -> SSAValue:
+    return UnrealizedConversionCastOp.get([], [attribute]).results[0]
+
+
+def _decode_dialect_op(instr: MicrocodeInstr) -> AstraOp:
+    match instr.opcode:
+        case OpCode.DMA_LOAD:
+            return MicrocodeDmaLoadOp(
+                _placeholder(IntegerType(64)),
+                PtrType(MemorySpace.SRAM0),
+                bytes=instr.imm,
+            )
+        case OpCode.DMA_STORE:
+            return MicrocodeDmaStoreOp(
+                _placeholder(PtrType(MemorySpace.SRAM0)),
+                IntegerType(64),
+                bytes=instr.imm,
+            )
+        case OpCode.MATMUL:
+            if instr.reg_a & _DIALECT_MARKER:
+                return ComputeMatmulOp(
+                    m=instr.reg_a & _DIALECT_VALUE_MASK,
+                    n=instr.reg_b,
+                    k=instr.imm,
+                )
+            sram_type = PtrType(MemorySpace.SRAM0)
+            operands = [
+                _placeholder(sram_type),
+                _placeholder(sram_type),
+            ]
+            if instr.reg_b & _DIALECT_MARKER:
+                operands.append(_placeholder(sram_type))
+            return MicrocodeMatmulOp.create(
+                operands=operands,
+                result_types=[sram_type],
+                properties={
+                    "m": IntAttr(instr.reg_a),
+                    "n": IntAttr(instr.reg_b & _DIALECT_VALUE_MASK),
+                    "k": IntAttr(instr.imm),
+                },
+            )
+        case OpCode.VECTOR_GELU:
+            sram = PtrType(MemorySpace.SRAM0)
+            return MicrocodeVectorGeluOp(
+                _placeholder(sram),
+                sram,
+            )
+        case OpCode.NOP | OpCode.HALT:
+            raise ValueError(f"{instr.opcode.name} has no Astra dialect operation")
+
+
+def disassemble_to_dialect(words: list[int]) -> list[AstraOp]:
+    """Decode words into detached, verified-shape Astra dialect operations."""
+    return [_decode_dialect_op(decode(word)) for word in words]
