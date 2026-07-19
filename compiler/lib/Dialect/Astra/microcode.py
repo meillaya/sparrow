@@ -65,12 +65,7 @@ def encode(
         raise ValueError("flags must fit in the 15-bit flags form")
 
     payload = imm if imm else (_FLAG_MARKER | flags if flags else 0)
-    return (
-        (int(opcode) << 48)
-        | (reg_a << 32)
-        | (reg_b << 16)
-        | payload
-    )
+    return (int(opcode) << 48) | (reg_a << 32) | (reg_b << 16) | payload
 
 
 def decode(word: int) -> MicrocodeInstr:

@@ -18,9 +18,7 @@ from compiler.lib.Dialect.Astra.microcode import MicrocodeInstr, OpCode, decode,
         (OpCode.HALT, 0, 0, 0),
     ],
 )
-def test_encode_decode_round_trip(
-    opcode: OpCode, reg_a: int, reg_b: int, imm: int
-) -> None:
+def test_encode_decode_round_trip(opcode: OpCode, reg_a: int, reg_b: int, imm: int) -> None:
     """Given one ISA opcode, encoding and decoding preserves its fields."""
     word = encode(opcode, reg_a, reg_b, imm=imm)
 
