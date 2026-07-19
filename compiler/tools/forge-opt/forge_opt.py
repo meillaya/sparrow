@@ -7,8 +7,11 @@ Phase 1 (Task 5) supports:
   stdout, after running the verifier. Used as the canonical "the dialect
   parses + prints + verifies" smoke test.
 
-Future actions (pass pipelines, conversion to ``forge.tensor``, …) land in
-later tasks; the CLI shape is forward-compatible.
+* ``--action=lower <file.mlir>`` — run GraphToTensor conversion.
+
+* ``--action=optimize <file.mlir>`` — Phase 2: run the chained pass
+  pipeline (default ``canonicalize,shape-inference,fuse``; overridable
+  with ``--pass-pipeline``).
 """
 
 from __future__ import annotations
@@ -31,6 +34,8 @@ from xdsl.utils.exceptions import DiagnosticException, ParseError, VerifyExcepti
 HERE = Path(__file__).resolve().parent
 LIB_ROOT = HERE.parent.parent / "lib"
 DIALECT_ROOT = LIB_ROOT / "Dialect"
+
+args: argparse.Namespace | None = None  # populated by main()
 
 # ``compiler/tools/forge-opt/`` has a dash, so it can't be a Python
 # package itself; add the directory that *contains* ``compiler/`` and
@@ -174,9 +179,105 @@ def run_lower(ctx: Context, source: str, source_name: str) -> ModuleOp:
     return module
 
 
+def _run_pass_pipeline(ctx: Context, module: ModuleOp, names: list[str]) -> ModuleOp:
+    """Run ``names`` (a list of registered pass names) in order over ``module``.
+
+    Each pass is followed by a fresh ``module.verify()`` so the next pass
+    in the chain observes a verifier-clean module. Unknown names are
+    hard errors (exit 4): silently dropping a typo looks like "did
+    nothing" and is much harder to debug than an explicit failure.
+    """
+    for name in names:
+        cls = _PASS_REGISTRY.get(name)
+        if cls is None:
+            known = ", ".join(sorted(_PASS_REGISTRY)) or "<none>"
+            print(
+                f"error: unknown pass {name!r}; known passes: {known}",
+                file=sys.stderr,
+            )
+            raise SystemExit(4)
+        cls().apply(ctx, module)
+        module.verify()
+    return module
+
+
+# Pass registry: pass name → ``ModulePass`` class. Populated by
+# ``_load_pass_registry`` (mirroring ``discover_dialects`` for
+# dialects), so that ``Transforms/Foo/__init__.py`` exports
+# ``FooPass.name == 'foo'`` is the entire convention.
+_PASS_REGISTRY: dict[str, type] = {}
+
+
+def _load_pass_registry() -> dict[str, type]:
+    registry: dict[str, type] = {}
+
+    try:
+        from compiler.lib.Conversion.GraphToTensor import GraphToTensorPass
+
+        registry["graph-to-tensor"] = GraphToTensorPass
+    except Exception:
+        pass
+
+    for module_name, class_name, pass_name in (
+        ("compiler.lib.Transforms.Canonicalize", "CanonicalizePass", "canonicalize"),
+        (
+            "compiler.lib.Transforms.ShapeInference",
+            "ShapeInferencePass",
+            "shape-inference",
+        ),
+        ("compiler.lib.Transforms.Fuse", "FusePass", "fuse"),
+    ):
+        try:
+            module = importlib.import_module(module_name)
+            cls = getattr(module, class_name, None)
+            if cls is not None and getattr(cls, "name", None) == pass_name:
+                registry[pass_name] = cls
+        except Exception:
+            pass
+
+    return registry
+
+
+_PASS_REGISTRY = _load_pass_registry()
+
+
+_DEFAULT_PIPELINE: tuple[str, ...] = ("canonicalize", "shape-inference", "fuse")
+
+
+def _active_pass_pipeline() -> list[str]:
+    """Return the active pass pipeline as a list of names.
+
+    ``--pass-pipeline='canonicalize,...'`` wins; otherwise we fall back
+    to the canonical Phase 2 pipeline, silently skipping any names that
+    are not yet registered (so the chained-pass commit lands before
+    Tasks 6/7 ship their per-pass commits). Unknown passes in the
+    explicit user-supplied pipeline are still hard errors — see
+    ``_run_pass_pipeline``.
+    """
+    raw = getattr(args, "pass_pipeline", None)
+    if raw:
+        return [n.strip() for n in raw.split(",") if n.strip()]
+    return [name for name in _DEFAULT_PIPELINE if name in _PASS_REGISTRY]
+
+
+def run_pass_pipeline(ctx: Context, source: str, source_name: str) -> ModuleOp:
+    """Parse, verify, run the chained pass pipeline, verify, print."""
+    parser = Parser(ctx, source, source_name)
+    module = parser.parse_module()
+    module.verify()
+    _run_pass_pipeline(ctx, module, _active_pass_pipeline())
+    Printer(stream=sys.stdout).print_op(module)
+    return module
+
+
+# Backwards-compatible alias: ``--action=optimize``.
+run_optimize = run_pass_pipeline
+
+
 ACTIONS = {
     "roundtrip": run_roundtrip,
     "lower": run_lower,
+    "optimize": run_optimize,
 }
 
 
@@ -200,7 +301,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--pass-pipeline",
         default=None,
-        help="Reserved for future use (Task 7 will wire graph-to-tensor).",
+        help="Comma-separated pass names to run in order "
+        "(e.g. 'canonicalize,shape-inference,fuse'). Overrides "
+        "--action=optimize's default canonical pipeline.",
     )
     parser.add_argument(
         "--no-auto-dialects",
@@ -228,6 +331,7 @@ def main(argv: list[str] | None = None) -> int:
         "and we want each one to fail in isolation rather than have the "
         "first parse error mask the others.",
     )
+    global args
     args = parser.parse_args(argv)
 
     if args.input == "-":
