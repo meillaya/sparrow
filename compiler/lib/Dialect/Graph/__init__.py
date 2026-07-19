@@ -5,15 +5,21 @@ This is the Phase-1 graph-level representation of captured PyTorch graphs
 promotion, dynamic shapes, view semantics, tensor aliasing, device placement —
 and is the input surface for the later GraphToTensor conversion pass.
 
-The dialect ships four ops for Phase 1:
+The dialect ships four ops for Phase 1 plus a dynamic-shape no-op:
 
-* ``forge.graph.matmul`` — 2D-ish matrix multiplication; broadcasts batch dims.
-* ``forge.graph.add``   — elementwise add with NumPy broadcasting.
-* ``forge.graph.gelu``  — exact GELU (PyTorch default).
-* ``forge.graph.view``  — reshape with no data movement.
+* ``forge.graph.matmul``       — 2D-ish matrix multiplication; broadcasts batch dims.
+* ``forge.graph.add``          — elementwise add with NumPy broadcasting.
+* ``forge.graph.gelu``         — exact GELU (PyTorch default).
+* ``forge.graph.view``         — reshape with no data movement.
+* ``forge.graph.symbolic_guard`` — trace-time metadata op asserting a
+  :class:`SymbolicConstraint` over a tensor's shape (Task 14). No-op at
+  runtime — Phase 3 owns the runtime evaluator per the plan.
 
-The tensor type encodes both static dims (``IntAttr``) and symbolic dims
-(``StringAttr``) so that dynamic shapes survive the FX → MLIR transition.
+The tensor type encodes static dims (``IntAttr``) and symbolic dims
+(``StringAttr``), and optionally carries a list of
+:class:`SymbolicConstraint` attrs (one per symbolic dim, in dim-order)
+so the per-tensor invariant set round-trips through the textual MLIR
+surface.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from xdsl.irdl import (
     BaseAttr,
     GenericData,
     IRDLOperation,
+    ParsePropInAttrDict,
     irdl_attr_definition,
     irdl_op_definition,
     operand_def,
@@ -49,6 +56,8 @@ from xdsl.parser import AttrParser
 from xdsl.printer import Printer
 from xdsl.utils.exceptions import VerifyException
 from xdsl.utils.str_enum import StrEnum
+
+from compiler.lib.Dialect.Graph.symbolic import SymbolicConstraint
 
 # ---------------------------------------------------------------------------
 # DType enum + attribute
@@ -108,8 +117,13 @@ class DTypeAttr(GenericData[ForgeDType]):
 
 
 def _is_symbolic_dim(name: str) -> bool:
-    """Return True iff ``name`` is a symbolic dim identifier (starts with a letter)."""
-    return bool(name) and (name[0].isalpha() or name[0] == "_")
+    """Return True iff ``name`` is a symbolic-dim identifier (starts with a letter, ``_``, or ``?``).
+
+    ``?`` is the anonymous-symbolic-dim marker introduced in Task 14 (e.g.
+    ``!forge.tensor<?x?x4096xf32, [...]>``); the constraint list on the type
+    supplies the canonical symbolic-dim name positionally.
+    """
+    return bool(name) and (name[0].isalpha() or name[0] in ("_", "?"))
 
 
 @dataclass(frozen=True, init=False)
@@ -137,21 +151,28 @@ class TensorType(ParametrizedAttribute, TypeAttribute):
     Syntax (parsed/printed by ``forge.tensor``)::
 
         !forge.tensor<dimxdimxdimx...xdtype>
+        !forge.tensor<dimxdimxdimx...xdtype, [constraint, ...]>
 
     where each ``dim`` is either an ``IntAttr`` (static, >=0) or a
-    ``StringAttr`` (symbolic name like ``B``, ``S``, ``K``), and the trailing
+    ``StringAttr`` (symbolic name like ``B``, ``S``, ``K``), the trailing
     ``dtype`` is one of the :class:`ForgeDType` spellings (``f32``, ``f16``,
-    ``bf16``, ``i32``, ``i8``, ``i4``).
+    ``bf16``, ``i32``, ``i8``, ``i4``), and the optional trailing
+    ``[constraint, ...]`` is a list of :class:`SymbolicConstraint` attrs
+    (one per symbolic dim, in dim-order). An empty list omits the
+    ``, [...]`` token entirely — concrete-shape IR keeps the original
+    Phase-1 surface.
     """
 
     name = "forge.tensor"
     shape: ArrayAttr[Attribute]
     dtype: DTypeAttr
+    constraints: ArrayAttr[SymbolicConstraint]
 
     def __init__(
         self,
         shape: Sequence[IntAttr | StringAttr | int | str],
         dtype: DTypeAttr | ForgeDType | str,
+        constraints: Sequence[SymbolicConstraint] | None = None,
     ) -> None:
         if isinstance(dtype, (ForgeDType, str)):
             dtype = DTypeAttr(dtype)
@@ -163,7 +184,8 @@ class TensorType(ParametrizedAttribute, TypeAttribute):
                 dims.append(StringAttr(dim))
             else:
                 dims.append(dim)
-        super().__init__(ArrayAttr(dims), dtype)
+        constraints_attr = ArrayAttr(tuple(constraints or ()))
+        super().__init__(ArrayAttr(dims), dtype, constraints_attr)
 
     # ----- accessors -------------------------------------------------------
 
@@ -172,6 +194,10 @@ class TensorType(ParametrizedAttribute, TypeAttribute):
 
     def get_dtype(self) -> ForgeDType:
         return self.dtype.data
+
+    def get_constraints(self) -> tuple[SymbolicConstraint, ...]:
+        """Return the constraint list (possibly empty)."""
+        return tuple(self.constraints.data)
 
     def num_elements(self) -> int | None:
         """Return the static element count, or ``None`` if any dim is symbolic."""
@@ -193,6 +219,8 @@ class TensorType(ParametrizedAttribute, TypeAttribute):
                 tokens.append(_parse_dim_token(parser))
                 if _peek_is_close_angle(parser):
                     break
+                if _peek_is_comma(parser):
+                    break
                 if not _consume_shape_x(parser):
                     break
             if not tokens:
@@ -210,7 +238,15 @@ class TensorType(ParametrizedAttribute, TypeAttribute):
                     f"unknown forge.dtype '{dtype_str}' "
                     f"(expected one of {sorted(_FORGE_DTYPE_VALUES)})"
                 )
-            return [ArrayAttr(tokens), DTypeAttr(ForgeDType(dtype_str))]
+            constraints_attr: ArrayAttr[SymbolicConstraint] = ArrayAttr(())
+            if _peek_is_comma(parser):
+                parser._consume_token()  # consume the ``,``
+                constraints_attr = ArrayAttr(tuple(_parse_constraint_list(parser)))
+            return [
+                ArrayAttr(tokens),
+                DTypeAttr(ForgeDType(dtype_str)),
+                constraints_attr,
+            ]
 
     def print_parameters(self, printer: Printer) -> None:
         with printer.in_angle_brackets():
@@ -225,12 +261,20 @@ class TensorType(ParametrizedAttribute, TypeAttribute):
                     printer.print_attribute(dim)
             printer.print_string("x")
             printer.print_string(self.dtype.data.value)
+            if self.constraints.data:
+                printer.print_string(", ")
+                with printer.in_square_brackets():
+                    for i, c in enumerate(self.constraints.data):
+                        if i > 0:
+                            printer.print_string(", ")
+                        printer.print_attribute(c)
 
     # ----- verifier --------------------------------------------------------
 
     def verify(self) -> None:
         if not self.shape.data:
             raise VerifyException("forge.tensor must have rank >= 1")
+        symbolic_dim_count = 0
         for dim in self.shape.data:
             if isinstance(dim, IntAttr):
                 if dim.data < 0:
@@ -241,15 +285,27 @@ class TensorType(ParametrizedAttribute, TypeAttribute):
                         f"forge.tensor symbolic dim must start with a letter "
                         f"or '_' (got {dim.data!r})"
                     )
+                symbolic_dim_count += 1
             else:  # pragma: no cover — defensive
                 raise VerifyException(
                     f"forge.tensor dim must be IntAttr or StringAttr, got {type(dim)}"
                 )
+        if len(self.constraints.data) != symbolic_dim_count:
+            raise VerifyException(
+                f"forge.tensor constraint list length "
+                f"({len(self.constraints.data)}) must equal the symbolic-dim "
+                f"count ({symbolic_dim_count})"
+            )
 
 
 def _peek_is_close_angle(parser: AttrParser) -> bool:
     """Return True iff the next token is the ``>`` ending ``<...>``."""
     return parser._current_token.kind.name == "GREATER"
+
+
+def _peek_is_comma(parser: AttrParser) -> bool:
+    """Return True iff the next token is a ``,`` (constraint-list separator)."""
+    return parser._current_token.kind.name == "COMMA"
 
 
 def _consume_shape_x(parser: AttrParser) -> bool:
@@ -271,17 +327,52 @@ def _consume_shape_x(parser: AttrParser) -> bool:
 
 
 def _parse_dim_token(parser: AttrParser) -> Attribute:
-    """Parse a single tensor dim (integer literal or symbolic identifier).
+    """Parse a single tensor dim (integer literal, ``?``, or symbolic identifier).
 
-    Returns ``IntAttr`` for INTEGER_LIT, ``StringAttr`` for BARE_IDENT.
+    Returns ``IntAttr`` for INTEGER_LIT, ``StringAttr("?")`` for the
+    anonymous-symbolic ``?`` punctuation, and ``StringAttr(name)`` for
+    BARE_IDENT (named symbolic dim like ``B``, ``S``, ``K``).
     """
     int_val = parser.parse_optional_integer(allow_boolean=False, allow_negative=False)
     if int_val is not None:
         return IntAttr(int_val)
+    if parser.parse_optional_punctuation("?") is not None:
+        return StringAttr("?")
     ident = parser.parse_optional_identifier()
     if ident is None:
-        parser.raise_error("expected forge.tensor dim (integer or identifier)")
+        parser.raise_error("expected forge.tensor dim (integer, '?', or identifier)")
     return StringAttr(ident)
+
+
+def _parse_constraint_list(parser: AttrParser) -> list[SymbolicConstraint]:
+    """Parse ``[<constraint>, <constraint>, ...]`` for a Tensor's constraint tail.
+
+    The leading ``,`` (separating the dtype from the list) is consumed by the
+    caller; we expect to start on the opening ``[`` and finish on the closing
+    ``]``. Empty list (``[]``) is allowed.
+    """
+    if parser.parse_optional_punctuation("[") is None:
+        parser.raise_error(
+            "expected '[' to open forge.tensor constraint list "
+            "(constraint list must be non-empty syntax-wise but may carry zero entries)"
+        )
+    out: list[SymbolicConstraint] = []
+    if parser.parse_optional_punctuation("]") is not None:
+        return out
+    while True:
+        attr = parser.parse_attribute()
+        if not isinstance(attr, SymbolicConstraint):
+            parser.raise_error(
+                f"expected #forge.symbolic_constraint, got {type(attr).__name__}"
+            )
+        out.append(attr)
+        if parser.parse_optional_punctuation("]") is not None:
+            break
+        if not parser.parse_optional_punctuation(","):
+            parser.raise_error(
+                "expected ',' or ']' inside forge.tensor constraint list"
+            )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +719,71 @@ class ViewOp(IRDLOperation):
             )
 
 
+@irdl_op_definition
+class SymbolicGuardOp(IRDLOperation):
+    """``forge.graph.symbolic_guard`` — trace-time metadata no-op (Task 14).
+
+    Carries a single :class:`SymbolicConstraint` attr over its ``input``
+    operand and returns the same tensor unchanged. The op is metadata-only:
+    the verifier checks that (a) the operand and result types match (so
+    downstream pattern matchers can rely on ``t == guard(t)``), and (b)
+    the constraint attr is well-formed (already covered by the attr's own
+    verifier). No runtime evaluation happens here — Phase 3 owns the
+    runtime evaluator per the plan.
+
+    The constraint travels as an ordinary attribute dictionary entry (not a
+    positional format argument) because xDSL's Declarative Assembly Format
+    treats ``UniqueBaseAttributeVariable`` (a non-builtin attr) by skipping
+    the ``#forge.symbolic_constraint`` prefix on print but expects it on
+    parse — a mismatch the format machinery doesn't bridge. Going through
+    the generic ``attr-dict`` keeps parse/print symmetric.
+    """
+
+    name = "forge.graph.symbolic_guard"
+    input = operand_def(TensorType)
+    out = result_def(TensorType)
+    constraint = prop_def(SymbolicConstraint)
+
+    irdl_options = [ParsePropInAttrDict()]
+    assembly_format = (
+        "$input attr-dict `:` `(` type($input) `)` `->` type($out)"
+    )
+
+    def __init__(
+        self,
+        input: object,
+        constraint: SymbolicConstraint,
+        result_type: TensorType | None = None,
+    ) -> None:
+        if result_type is None:
+            input_t = _extract_tensor(input)
+            result_type = input_t
+        super().__init__(
+            operands=(input,),
+            result_types=(result_type,),
+            properties={"constraint": constraint},
+        )
+
+    def verify_(self) -> None:
+        input_t = _extract_tensor(self.input)
+        if not isinstance(self.out.type, TensorType):
+            raise VerifyException(
+                f"symbolic_guard result must be !forge.tensor, got {self.out.type}"
+            )
+        # Guard must be a no-op shape-wise — operand and result types
+        # are identical so downstream pattern matchers can rely on it.
+        if input_t.get_shape() != self.out.type.get_shape():
+            raise VerifyException(
+                f"symbolic_guard preserves shape: input {input_t.get_shape()} "
+                f"vs result {self.out.type.get_shape()}"
+            )
+        if input_t.get_dtype() != self.out.type.get_dtype():
+            raise VerifyException(
+                f"symbolic_guard preserves dtype: input {input_t.get_dtype()} "
+                f"vs result {self.out.type.get_dtype()}"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Dialect registration
 # ---------------------------------------------------------------------------
@@ -640,10 +796,12 @@ Graph = Dialect(
         AddOp,
         GeluOp,
         ViewOp,
+        SymbolicGuardOp,
     ],
     [
         TensorType,
         DTypeAttr,
         GeluApproxAttr,
+        SymbolicConstraint,
     ],
 )
