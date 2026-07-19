@@ -1,8 +1,14 @@
-"""End-to-end FusedMLP differential pytest (Phase 1, Task 13).
+"""End-to-end FusedMLP differential pytest (Phase 1, Task 13; Phase 2, Task 20).
 
 Builds the FusedMLP model, runs eager, runs through
 ``torch.compile(backend="forgestack")``, asserts the validation result
 passes for at least 3 random shapes (spec §19).
+
+Phase 2 / Wave 5 (Task 20) extends the shape coverage to 6 by adding
+three stress shapes: ``[8, 1024, 8192, 16384]`` (heavy square matmul),
+``[16, 2048, 1024, 4096]`` (long-sequence batch), ``[1, 1, 512, 2048]``
+(singleton batch — exercises the per-axis cases the canonical
+``[2, 512, 4096, 11008]`` doesn't).
 
 The shipped scope keeps the compiled path delegating to the eager
 kernel, so the differential test confirms the *pipeline* — FX capture,
@@ -27,6 +33,10 @@ SHAPES = [
     (1, 128, 2048, 4096),
     # Tiny smoke
     (4, 64, 512, 1024),
+    # Wave 5 stress shapes (Task 20)
+    (8, 1024, 8192, 16384),
+    (16, 2048, 1024, 4096),
+    (1, 1, 512, 2048),
 ]
 
 
