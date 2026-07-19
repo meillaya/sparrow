@@ -2,6 +2,8 @@
 # Task 10 wires the ABI: TensorDescriptor / ArtifactDescriptor / Buffer /
 # Event / DeviceProvider + GoogleTest round-trip tests. Tasks 11+ add the
 # Triton provider, ExecutionPlan, and scheduler on top of this surface.
+# Task 12 adds ExecutionPlan + JSON (de)serialization + the topological
+# scheduler on top of the ABI surfaces.
 add_library(forgestack_runtime STATIC
     lib/abi_types.cpp
     lib/tensor_descriptor.cpp
@@ -10,10 +12,19 @@ add_library(forgestack_runtime STATIC
     lib/event.cpp
     lib/result.cpp
     lib/forge_rt.cpp
+    lib/providers/triton_provider.cpp
+    lib/execution_plan.cpp
+    lib/scheduler.cpp
 )
 
 target_include_directories(forgestack_runtime PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    # TritonProvider::launch calls into backends/triton/cpu/. The kernel
+    # header is a self-contained .hpp pair with no external deps, so the
+    # runtime can reach in directly without dragging the kernel CMake
+    # target into the runtime's link line. Phase 5 may invert this if
+    # the kernel grows into a real pybind11/Triton module.
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../backends/triton/cpu>
 )
 
 target_compile_features(forgestack_runtime PUBLIC cxx_std_20)

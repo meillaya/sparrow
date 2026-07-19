@@ -57,3 +57,7 @@ endif()
 if(FORGESTACK_BUILD_BACKENDS)
     add_subdirectory(backends)
 endif()
+# Triton backend Path A CPU kernel (spec §7 Path A) — Task 11 wires the
+# TritonDeviceProvider on top of this. Not gated: the kernel is required
+# by the runtime today, so it has to land in the default build.
+add_subdirectory(backends/triton/cpu)
