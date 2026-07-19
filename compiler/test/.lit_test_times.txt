@@ -1,4 +1,7 @@
-4.065087e-01 Dialect/Tensor/roundtrip.mlir
-1.813414e-01 Dialect/Graph/invalid.mlir
-1.777227e-01 Dialect/Graph/roundtrip.mlir
-1.937842e-01 Dialect/Tensor/invalid.mlir
+5.053613e-01 Dialect/Tensor/roundtrip.mlir
+2.338698e-01 Dialect/Graph/invalid.mlir
+2.647254e-01 Dialect/Graph/roundtrip.mlir
+3.048015e-01 Dialect/Tensor/invalid.mlir
+2.691777e-01 Conversion/GraphToTensor/fused_mlp.mlir
+3.002005e-01 Conversion/GraphToTensor/idempotent.mlir
+2.559364e-01 Conversion/GraphToTensor/invalid.mlir

@@ -147,8 +147,36 @@ def run_roundtrip(ctx: Context, source: str, source_name: str) -> ModuleOp:
     return module
 
 
+def run_lower(ctx: Context, source: str, source_name: str) -> ModuleOp:
+    """Parse, verify, run GraphToTensor, verify again, then print.
+
+    Task 7 wiring: when the user asks for ``--action=lower`` we apply the
+    ``GraphToTensorPass`` module pass on top of the parsed module. The
+    pass class is imported lazily so the import error surfaces only for
+    users who actually request lowering — keeping the round-trip path
+    free of Conversion-package dependencies.
+
+    We re-verify after the pass to catch any verifier regression early
+    (the dialect-level verifiers all run again on the freshly-rewritten
+    ops). The pre-pass verifier covers parse + dialect validation; the
+    post-pass verifier covers the lowered ``forge.tensor.*`` ops.
+    """
+    parser = Parser(ctx, source, source_name)
+    module = parser.parse_module()
+    module.verify()
+
+    from compiler.lib.Conversion.GraphToTensor import GraphToTensorPass
+
+    GraphToTensorPass().apply(ctx, module)
+    module.verify()
+
+    Printer(stream=sys.stdout).print_op(module)
+    return module
+
+
 ACTIONS = {
     "roundtrip": run_roundtrip,
+    "lower": run_lower,
 }
 
 
