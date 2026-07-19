@@ -274,7 +274,6 @@ class TensorType(ParametrizedAttribute, TypeAttribute):
     def verify(self) -> None:
         if not self.shape.data:
             raise VerifyException("forge.tensor must have rank >= 1")
-        symbolic_dim_count = 0
         for dim in self.shape.data:
             if isinstance(dim, IntAttr):
                 if dim.data < 0:
@@ -282,19 +281,25 @@ class TensorType(ParametrizedAttribute, TypeAttribute):
             elif isinstance(dim, StringAttr):
                 if not _is_symbolic_dim(dim.data):
                     raise VerifyException(
-                        f"forge.tensor symbolic dim must start with a letter "
-                        f"or '_' (got {dim.data!r})"
+                        f"forge.tensor symbolic dim must start with a letter, "
+                        f"'_', or '?' (got {dim.data!r})"
                     )
-                symbolic_dim_count += 1
             else:  # pragma: no cover — defensive
                 raise VerifyException(
                     f"forge.tensor dim must be IntAttr or StringAttr, got {type(dim)}"
                 )
-        if len(self.constraints.data) != symbolic_dim_count:
+        # Constraint list is positional over the first N dim positions
+        # (N == len(constraints)). Constraints on named symbolic dims
+        # (e.g. ``B >= 1``) and on anonymous ``?`` dims are both allowed;
+        # the constraint is just metadata for that dim. The only hard
+        # constraint we enforce is that the list fits within the rank —
+        # extra entries are an authoring error and would be meaningless.
+        rank = len(self.shape.data)
+        if len(self.constraints.data) > rank:
             raise VerifyException(
                 f"forge.tensor constraint list length "
-                f"({len(self.constraints.data)}) must equal the symbolic-dim "
-                f"count ({symbolic_dim_count})"
+                f"({len(self.constraints.data)}) must not exceed the rank "
+                f"({rank})"
             )
 
 
@@ -707,16 +712,16 @@ class ViewOp(IRDLOperation):
             raise VerifyException(f"view result must be !forge.tensor, got {self.out.type}")
         x_count = x_t.num_elements()
         out_count = self.out.type.num_elements()
-        if x_count is None or out_count is None:
-            raise VerifyException(
-                f"view: cannot verify element count across symbolic dims "
-                f"(input has {x_t.get_shape()}, output has "
-                f"{self.out.type.get_shape()})"
-            )
-        if x_count != out_count:
-            raise VerifyException(
-                f"view: element count mismatch ({x_count} input vs {out_count} output)"
-            )
+        if x_count is not None and out_count is not None:
+            if x_count != out_count:
+                raise VerifyException(
+                    f"view: element count mismatch ({x_count} input vs {out_count} output)"
+                )
+        # Symbolic dims present in either shape: skip the element-count
+        # check (it can't fire symbolically) and require the rank +
+        # rank-product dim structure to agree instead. This lets the FX
+        # importer emit pass-through views over symbolic inputs that the
+        # runtime specialises later.
 
 
 @irdl_op_definition

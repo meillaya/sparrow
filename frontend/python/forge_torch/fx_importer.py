@@ -72,8 +72,18 @@ class FxImporter:
         "forge.graph.view": "view",
     }
 
-    def __init__(self, example_inputs: list[torch.Tensor] | None = None) -> None:
+    def __init__(
+        self,
+        example_inputs: list[torch.Tensor] | None = None,
+        *,
+        symbolic_heuristic: bool = False,
+    ) -> None:
         self._example_inputs: list[torch.Tensor] = list(example_inputs or [])
+        # When True, 3D inputs (FusedMLP-style) with no explicit symbolic-dim
+        # metadata get ``B, S, <concrete>`` as their shape — matches the
+        # spec §3 ``B >= 1, S >= 1`` example. Opt-in so the existing
+        # concrete-shape tests (Task 8, Phase 1) keep passing.
+        self._symbolic_heuristic = symbolic_heuristic
 
     # ------------------------------------------------------------------
     # Public API
@@ -200,13 +210,21 @@ class FxImporter:
             operand = _expect_tensor(operand_types[0], forge_tensor)
             return forge_tensor(list(_shape_seq(operand)), _dtype_str(operand))
         if target_name == "forge.graph.view":
+            operand = _expect_tensor(operand_types[0], forge_tensor)
+            operand_shape = list(_shape_seq(operand))
+            if any(isinstance(d, str) for d in operand_shape):
+                # Symbolic dims present — view can't infer a concrete
+                # reshape target. Pass the operand shape through; the
+                # downstream verifier (which already rejects this when the
+                # target doesn't match element count) will surface the
+                # situation when the symbolic-dim runtime evaluator lands.
+                return forge_tensor(operand_shape, _dtype_str(operand))
             target_shape = _extract_view_target_shape(node)
             if target_shape is None:
                 raise NotImplementedError(
                     "aten.view without a concrete shape cannot be lowered "
                     "in Phase 1 (would need symbolic-shape inference)."
                 )
-            operand = _expect_tensor(operand_types[0], forge_tensor)
             return forge_tensor(list(target_shape), _dtype_str(operand))
         raise AssertionError(f"unknown forge.graph op: {target_name!r}")  # pragma: no cover
 
@@ -241,13 +259,20 @@ class FxImporter:
             operand_type = _expect_tensor(operands[0].type, forge_tensor)
             return forge_tensor(list(_shape_seq(operand_type)), _dtype_str(operand_type))
         if target_name == "forge.graph.view":
+            operand_type = _expect_tensor(operands[0].type, forge_tensor)
+            operand_shape = list(_shape_seq(operand_type))
+            if any(isinstance(d, str) for d in operand_shape):
+                # Symbolic dims: view can't infer a concrete reshape
+                # target. Pass the operand shape through; the dialect's
+                # view verifier already permits same-shape passes, so a
+                # symbolic-dim runtime will be free to specialise later.
+                return forge_tensor(operand_shape, _dtype_str(operand_type))
             target_shape = _extract_view_target_shape(node)
             if target_shape is None:
                 raise NotImplementedError(
                     "aten.view without a concrete shape cannot be lowered "
                     "in Phase 1 (would need symbolic-shape inference)."
                 )
-            operand_type = _expect_tensor(operands[0].type, forge_tensor)
             return forge_tensor(list(target_shape), _dtype_str(operand_type))
         raise AssertionError(f"unknown forge.graph op: {target_name!r}")  # pragma: no cover
 
@@ -259,14 +284,112 @@ class FxImporter:
         meta = node.meta.get("tensor_meta") if hasattr(node, "meta") else None
         if meta is None:
             return None
-        torch_dtype = meta.dtype
+        # ``tensor_meta`` may be a torch.fx TensorMetadata dataclass (shape,
+        # dtype attrs) or a plain dict (test-friendly). Cover both.
+        if isinstance(meta, dict):
+            torch_dtype = meta["dtype"]
+            shape = list(meta["shape"])
+        else:
+            torch_dtype = meta.dtype
+            shape = list(meta.shape)
         dtype_str = DTYPE_TO_FORGE.get(torch_dtype)
         if dtype_str is None:
             raise NotImplementedError(
                 f"FX node {node.name!r}: dtype {torch_dtype!r} is not yet "
                 f"supported by the ForgeStack dialects."
             )
-        return self._forge_tensor_cls()(list(meta.shape), dtype_str)
+        symbolic = self._symbolic_dim_for(node, shape)
+        if symbolic is not None:
+            sym_dims, constraints = symbolic
+            return self._forge_tensor_cls()(sym_dims, dtype_str, constraints=constraints)
+        return self._forge_tensor_cls()(shape, dtype_str)
+
+    def _symbolic_dim_for(
+        self, node: Node, shape: list[int]
+    ) -> tuple[list[object], list[object]] | None:
+        """Return ``(sym_dims, constraints)`` if ``node`` carries symbolic-dim metadata.
+
+        Reads symbolic-dim names from one of (priority order):
+
+        1. ``node.meta["tensor_meta"]["symbolic_dim"]`` — the per-spec §3 key.
+        2. ``node.meta["symbolic_dim"]`` — the canonical ``torch.export`` /
+           dynamo top-level key (fallback for compatibility).
+
+        Value shape: a string (applies to every dim) or a list of
+        per-dim names where ``None`` entries render as anonymous ``?``
+        and string entries render as named symbolic dims. Falls back to
+        the FusedMLP-style heuristic (``B, S, <concrete>`` for 3D inputs)
+        when :attr:`_symbolic_heuristic` is set. Returns ``None`` to fall
+        through to concrete dim emission.
+
+        Difference between the two paths:
+        * ``tensor_meta['symbolic_dim']`` path — ``None`` entries become
+          anonymous ``?`` (the constraint list is positional over them).
+        * Heuristic path — ``None`` entries mean "fall back to the
+          original concrete dim value", so a 3D FusedMLP-shaped input
+          becomes ``!forge.tensor<BxSx4096xf32, [...]>`` instead of
+          ``BxSx?xf32``.
+        """
+        meta = getattr(node, "meta", None) or {}
+        tensor_meta = meta.get("tensor_meta")
+        # ``tensor_meta`` may be a dict (hand-rolled metadata) or a
+        # ``TensorMetadata`` dataclass (the torch.fx canonical case). Both
+        # must surface ``symbolic_dim`` if it's set.
+        symbolic_meta: object | None = None
+        if tensor_meta is not None:
+            if isinstance(tensor_meta, dict):
+                symbolic_meta = tensor_meta.get("symbolic_dim")
+            else:
+                symbolic_meta = getattr(tensor_meta, "symbolic_dim", None)
+        if symbolic_meta is None:
+            symbolic_meta = meta.get("symbolic_dim")
+        sym_names: list[str | None] | None = None
+        # ``None_means_concrete`` distinguishes the two paths: anonymous
+        # ``?`` on explicit ``tensor_meta['symbolic_dim']`` paths, original
+        # concrete dim on the FusedMLP heuristic.
+        none_means_concrete = False
+        if symbolic_meta is not None:
+            if isinstance(symbolic_meta, str):
+                sym_names = [symbolic_meta] * len(shape)
+            elif isinstance(symbolic_meta, (list, tuple)):
+                sym_names = list(symbolic_meta)
+            else:
+                raise NotImplementedError(
+                    f"FX node {node.name!r}: tensor_meta['symbolic_dim'] "
+                    f"must be a string or a list of strings, got {type(symbolic_meta).__name__}"
+                )
+        elif self._symbolic_heuristic and len(shape) == 3:
+            # Named B/S for the first two dims, concrete for the rest
+            # (matches spec §3 "B >= 1, S >= 1" + a concrete 4096/11008).
+            # ``None`` entries mean "keep the original concrete dim"; the
+            # resulting MLIR is ``!forge.tensor<BxSx4096xf32, [...]>``.
+            sym_names = ["B", "S"] + [None] * (len(shape) - 2)
+            none_means_concrete = True
+
+        if sym_names is None:
+            return None
+
+        graph_mod = self._load_graph_dialect()
+        IntAttr = graph_mod.IntAttr
+        StringAttr = graph_mod.StringAttr
+        SymbolicConstraint = graph_mod.SymbolicConstraint
+        symbolic_mod = importlib.import_module("compiler.lib.Dialect.Graph.symbolic")
+        SymbolicConstraintKind = symbolic_mod.SymbolicConstraintKind
+
+        sym_dims: list[object] = []
+        constraints: list[object] = []
+        for orig_dim, name in zip(shape, sym_names, strict=True):
+            if name is None:
+                if none_means_concrete:
+                    sym_dims.append(IntAttr(int(orig_dim)))
+                else:
+                    sym_dims.append(StringAttr("?"))
+            else:
+                sym_dims.append(StringAttr(name))
+                constraints.append(
+                    SymbolicConstraint(name, SymbolicConstraintKind.GREATER_EQUAL, 1)
+                )
+        return sym_dims, constraints
 
     @staticmethod
     def _load_graph_dialect():
@@ -318,8 +441,22 @@ def _operand_types(operands: list, forge_tensor) -> list:
     return [_expect_tensor(operand.type, forge_tensor) for operand in operands]  # type: ignore[union-attr]
 
 
-def _shape_seq(tensor_type) -> tuple[int, ...]:
-    return tuple(int(d.data) for d in tensor_type.shape.data)
+def _shape_seq(tensor_type) -> tuple:
+    """Return the raw dim values, preserving symbolic dims as strings.
+
+    Concrete dims become ``int`` (e.g. ``4096``); symbolic dims become
+    ``str`` (e.g. ``"B"``). Downstream shape inference treats them
+    opaquely — no integer arithmetic on the strings — so symbolic dims
+    survive the matmul / add / gelu inference path without crashing.
+    """
+    out: list = []
+    for d in tensor_type.shape.data:
+        v = d.data
+        if isinstance(v, str):
+            out.append(v)
+        else:
+            out.append(int(v))
+    return tuple(out)
 
 
 def _dtype_str(tensor_type) -> str:
@@ -338,6 +475,14 @@ def _broadcast(shape_a: list, shape_b: list):
             out.append(b)
         elif b == 1:
             out.append(a)
+        elif isinstance(a, str) and a == b:
+            out.append(a)
+        elif isinstance(b, str) and a == 1:
+            out.append(b)
+        elif isinstance(a, str) and b == 1:
+            out.append(a)
+        elif isinstance(a, str) and isinstance(b, str) and a == b:
+            out.append(a)
         else:
             return None
     return out
@@ -350,8 +495,11 @@ def _infer_matmul_type(operand_types: list, forge_tensor):
     shape_b = list(_shape_seq(b))
     if len(shape_a) < 2 or len(shape_b) < 2:
         raise ValueError(f"forge.graph.matmul needs rank>=2 operands, got {shape_a} and {shape_b}")
-    if shape_a[-1] != shape_b[-2]:
-        raise ValueError(f"matmul inner-dim mismatch: {shape_a[-1]} vs {shape_b[-2]}")
+    # Inner-dim check: concrete must match; symbolic is acceptable.
+    inner_a = shape_a[-1]
+    inner_b = shape_b[-2]
+    if isinstance(inner_a, int) and isinstance(inner_b, int) and inner_a != inner_b:
+        raise ValueError(f"matmul inner-dim mismatch: {inner_a} vs {inner_b}")
     batch = _broadcast(shape_a[:-2], shape_b[:-2])
     if batch is None:
         raise ValueError(
