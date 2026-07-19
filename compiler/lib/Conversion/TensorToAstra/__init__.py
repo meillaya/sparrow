@@ -62,11 +62,11 @@ from collections.abc import Iterator
 from xdsl.context import Context
 from xdsl.dialects.builtin import (
     IntAttr,
-    IntegerAttr,
     IntegerType,
     ModuleOp,
 )
-from xdsl.ir import BlockArgument, OpResult, SSAValue
+from xdsl.ir import SSAValue
+from xdsl.irdl import IRDLOperation
 from xdsl.passes import ModulePass
 from xdsl.pattern_rewriter import (
     GreedyRewritePatternApplier,
@@ -91,10 +91,11 @@ from compiler.lib.Dialect.Astra import (
 from compiler.lib.Dialect.Graph import TensorType
 from compiler.lib.Dialect.Tensor import (
     Activation,
-    ActivationAttr,
     BroadcastAddOp,
     FusedEpilogueOp,
     GemmOp,
+)
+from compiler.lib.Dialect.Tensor import (
     GeluOp as TensorGeluOp,
 )
 
@@ -185,9 +186,7 @@ def _matmul_MNK(a: TensorType, b: TensorType) -> tuple[int, int, int]:
     K_b = b_shape[-2]
     N = b_shape[-1]
     if K_a != K_b:
-        raise VerifyException(
-            f"TensorToAstra.matmul: inner K mismatch ({K_a} vs {K_b})"
-        )
+        raise VerifyException(f"TensorToAstra.matmul: inner K mismatch ({K_a} vs {K_b})")
     K = K_a
     return M, N, K
 
@@ -202,9 +201,7 @@ def _bias_N(bias: TensorType) -> int:
     """
     shape = _shape_of(bias)
     if len(shape) != 1:
-        raise VerifyException(
-            f"TensorToAstra.bias: expected rank-1 bias (N,), got shape={shape}"
-        )
+        raise VerifyException(f"TensorToAstra.bias: expected rank-1 bias (N,), got shape={shape}")
     return shape[0]
 
 
@@ -235,8 +232,11 @@ class GemmPattern(RewritePattern):
         a_t = op.a.type
         b_t = op.b.type
         y_t = op.out.type
-        if not isinstance(a_t, TensorType) or not isinstance(b_t, TensorType) \
-                or not isinstance(y_t, TensorType):
+        if (
+            not isinstance(a_t, TensorType)
+            or not isinstance(b_t, TensorType)
+            or not isinstance(y_t, TensorType)
+        ):
             return  # verifier hasn't run yet — let it fail elsewhere
 
         M, N, K = _matmul_MNK(a_t, b_t)
@@ -342,15 +342,15 @@ class FusedEpiloguePattern(RewritePattern):
 
         if op.bias is not None:
             bias_t = op.bias.type
-            if isinstance(bias_t, TensorType) and isinstance(x_t, TensorType):
-                # Only check bias N against x N when both are tensors
-                # (case A). In case B the x is i64 and we used
-                # placeholder M/N — deferring the real check to Task 48.
-                if _bias_N(bias_t) != N:
-                    raise VerifyException(
-                        f"TensorToAstra.fused_epilogue: bias N={_bias_N(bias_t)} "
-                        f"does not match x N={N}"
-                    )
+            # Defer bias-vs-x N check when x is i64 (Task 48 owns the real shapes).
+            if (
+                isinstance(bias_t, TensorType)
+                and isinstance(x_t, TensorType)
+                and _bias_N(bias_t) != N
+            ):
+                raise VerifyException(
+                    f"TensorToAstra.fused_epilogue: bias N={_bias_N(bias_t)} does not match x N={N}"
+                )
             dma_load_b = MicrocodeDmaLoadOp.create(
                 operands=[dram_b],
                 result_types=[_SRAM_PTR_TYPE],
@@ -404,9 +404,7 @@ class BroadcastAddPattern(RewritePattern):
         # by a fused_epilogue, so the removal is unconditional. A future
         # batch will introduce the folding logic for the unfused case.
         for user in op.out.uses:
-            if not isinstance(
-                user.operation, (FusedEpilogueOp,)
-            ):
+            if not isinstance(user.operation, (FusedEpilogueOp,)):
                 # Unsupported consumer — leave the op alone so the
                 # verifier rejects it. (The conversion pass is
                 # idempotent on ops it doesn't pattern-match.)
@@ -432,9 +430,7 @@ class TensorGeluPattern(RewritePattern):
             return
 
         dram_x = _make_dram_ptr(rewater := rewriter, op, base=0x6000)
-        dram_z = _make_dram_ptr(rewater, op, base=0x7000)
         sram_x = _make_sram_ptr(rewater, op, dram_x)
-        sram_z = _make_sram_ptr(rewater, op, dram_z)
 
         # dma_load (read the input from DRAM into SRAM) + vector_gelu +
         # (no dma_store — the caller will consume %z via the next op's
@@ -582,8 +578,7 @@ class TensorToAstraPass(ModulePass):
         # negative test sees a clean error message.
         for leftover in _walk_unsupported_tensor_ops(op):
             raise VerifyException(
-                f"TensorToAstra: no astra equivalent for "
-                f"{leftover.name} (Task 42 spec)"
+                f"TensorToAstra: no astra equivalent for {leftover.name} (Task 42 spec)"
             )
 
 

@@ -146,9 +146,7 @@ class PtrType(ParametrizedAttribute, TypeAttribute):
 
     def __init__(self, space: MemorySpaceAttr | MemorySpace | str) -> None:
         if isinstance(space, (MemorySpace, str)):
-            space = MemorySpaceAttr(
-                space if isinstance(space, MemorySpace) else MemorySpace(space)
-            )
+            space = MemorySpaceAttr(space if isinstance(space, MemorySpace) else MemorySpace(space))
         super().__init__(space)
 
     @classmethod
