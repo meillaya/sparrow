@@ -14,7 +14,9 @@ Four tests pin the :class:`forge_torch.report.CompilationReport` contract:
 
 from __future__ import annotations
 
-from forge_torch.report import CompilationReport
+from dataclasses import dataclass
+
+from frontend.python.forge_torch.report import CompilationReport
 
 # Section headings the spec §16 example requires. Each appears verbatim in
 # the rendered report; the assertions below guard against accidental
@@ -41,7 +43,26 @@ REQUIRED_SECTIONS = [
 ]
 
 
+@dataclass(frozen=True, slots=True)
+class _Allocation:
+    byte_offset: int
+    byte_size: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionPlan:
+    allocations: tuple[_Allocation, ...]
+
+
 def _populated_report() -> CompilationReport:
+    mebibyte = 1024 * 1024
+    plan = _ExecutionPlan(
+        allocations=(
+            _Allocation(byte_offset=0, byte_size=mebibyte),
+            _Allocation(byte_offset=mebibyte, byte_size=2 * mebibyte),
+            _Allocation(byte_offset=0, byte_size=mebibyte),
+        )
+    )
     return CompilationReport(
         model_name="FusedMLP",
         captured_fx_nodes=3,
@@ -58,18 +79,20 @@ def _populated_report() -> CompilationReport:
             "warps": 8,
             "stages": 4,
         },
-        original_intermediate_memory_mb=45.0,
-        planned_intermediate_memory_mb=8.0,
         generated_kernels=1,
         validation_max_error=0.0,
+        plan=plan,
     )
 
 
 def test_report_render_contains_required_sections() -> None:
     """All 18 spec §16 section headings appear in the rendered output."""
-    rendered = _populated_report().render()
+    report = _populated_report()
+    rendered = report.render()
     missing = [section for section in REQUIRED_SECTIONS if section not in rendered]
     assert not missing, f"rendered report missing required sections: {missing}"
+    assert report.original_intermediate_memory_mb == 4.0
+    assert report.planned_intermediate_memory_mb == 3.0
     # The model name and the FX/MLIR counts are echoed verbatim.
     assert "FusedMLP" in rendered
     assert "triton" in rendered
