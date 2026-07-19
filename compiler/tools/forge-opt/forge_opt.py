@@ -12,6 +12,12 @@ Phase 1 (Task 5) supports:
 * ``--action=optimize <file.mlir>`` — Phase 2: run the chained pass
   pipeline (default ``canonicalize,shape-inference,fuse``; overridable
   with ``--pass-pipeline``).
+
+Wave 9 (Task 43) adds:
+
+* ``--action=lower-astra <file.mlir>`` — run the Phase-4 chained pass
+  pipeline (canonicalize, shape-inference, fuse, tensor-to-astra). The
+  pipeline ends with the TensorToAstra conversion pass from Task 42.
 """
 
 from __future__ import annotations
@@ -179,6 +185,39 @@ def run_lower(ctx: Context, source: str, source_name: str) -> ModuleOp:
     return module
 
 
+def run_lower_astra(ctx: Context, source: str, source_name: str) -> ModuleOp:
+    """Parse, verify, run the chained Wave-9 pipeline ending with TensorToAstra.
+
+    Task 43 wiring: when the user asks for ``--action=lower-astra`` we
+    run the canonical Phase-2 chained pipeline (canonicalize →
+    shape-inference → fuse) and then the Wave-9 TensorToAstra pass on
+    top. The chained pipeline is run via the same ``_run_pass_pipeline``
+    machinery as ``--action=optimize`` (so ``--pass-pipeline=...``
+    overrides it), with ``tensor-to-astra`` appended at the end.
+
+    ``arith`` is loaded explicitly here because the TensorToAstra pass
+    materialises placeholder dram pointers via ``arith.constant`` (see
+    ``compiler/lib/Conversion/TensorToAstra/__init__.py``).
+    """
+    from xdsl.dialects.arith import Arith
+
+    ctx.load_dialect(Arith)
+
+    parser = Parser(ctx, source, source_name)
+    module = parser.parse_module()
+    module.verify()
+
+    # The pipeline always ends with `tensor-to-astra`; we append it
+    # explicitly because `_active_pass_pipeline` silently drops unknown
+    # names from user-supplied `--pass-pipeline`.
+    pipeline = _active_pass_pipeline()
+    pipeline.append("tensor-to-astra")
+    _run_pass_pipeline(ctx, module, pipeline)
+
+    Printer(stream=sys.stdout).print_op(module)
+    return module
+
+
 def _run_pass_pipeline(ctx: Context, module: ModuleOp, names: list[str]) -> ModuleOp:
     """Run ``names`` (a list of registered pass names) in order over ``module``.
 
@@ -215,6 +254,13 @@ def _load_pass_registry() -> dict[str, type]:
         from compiler.lib.Conversion.GraphToTensor import GraphToTensorPass
 
         registry["graph-to-tensor"] = GraphToTensorPass
+    except Exception:
+        pass
+
+    try:
+        from compiler.lib.Conversion.TensorToAstra import TensorToAstraPass
+
+        registry["tensor-to-astra"] = TensorToAstraPass
     except Exception:
         pass
 
@@ -278,6 +324,7 @@ ACTIONS = {
     "roundtrip": run_roundtrip,
     "lower": run_lower,
     "optimize": run_optimize,
+    "lower-astra": run_lower_astra,
 }
 
 
