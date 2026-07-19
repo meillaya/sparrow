@@ -4,28 +4,25 @@ MLIR-based heterogeneous ML compiler and C++ runtime for PyTorch. Phase 1 ships 
 
 See `.omo/plans/forgestack.md` for the full Phase 1 plan.
 
-## Status (Phase 1)
+## Shipped (Phase 1)
 
-Shipped:
-
-- **Frontend** — `torch.compile(backend="forgestack")` + FX → MLIR importer
-- **Compiler** — `forge.graph` and `forge.tensor` xDSL dialects + GraphToTensor conversion pass + lit/FileCheck golden tests
-- **Backend** — Triton path-A kernel template (CPU reference implementation) + C++ CPU `fused_gemm_bias_gelu` kernel
-- **Runtime** — ForgeRT C++: `TensorDescriptor`, `ArtifactDescriptor`, `Buffer`, `Event`, `DeviceProvider` abstract interface, Triton provider, `ExecutionPlan` + JSON, topological scheduler
+- **Frontend** — `torch.compile(backend="forgestack")` hook + FX → MLIR importer
+- **Compiler** — `forge.graph` and `forge.tensor` xDSL dialects + `forge_opt.py` driver + GraphToTensor conversion pass + lit/FileCheck golden tests
+- **Backend** — Triton path-A kernel template + C++ CPU `fused_gemm_bias_gelu` kernel
+- **Runtime** — ForgeRT C++ ABI (`TensorDescriptor`, `ArtifactDescriptor`, `Buffer`, `Event`, `DeviceProvider` abstract interface), Triton provider, `ExecutionPlan` + JSON, topological scheduler
 - **Cache + Report** — hierarchical compilation cache key (per spec §13) + observability report (per spec §16)
 - **Validation** — differential harness (`torch.allclose` + NaN/Inf/aliasing/mutation checks) + end-to-end FusedMLP pytest across 3 shapes
+- **CI** — `scripts/ci.sh` master gate
 
-Test counts: 26 pytest + 7 lit FileCheck + 13 gtest = **46 tests passing** (1 skipped: CUDA-required Triton path).
+## In progress (Phases 2-8 CPU extensions)
 
-Explicitly deferred (separate planning cycles):
-
-- Phase 2: canonicalization, shape inference, fusion, dynamic-shape guards, differential verification hardening
-- Phase 3: ForgeRT memory planning upgrade
-- Phase 4: `astra` dialect + microcode + cycle-accurate simulator
-- Phase 5: Triton path B (elementwise codegen), quantized GEMM, autotuning, real GPU pipeline via pybind11
-- Phase 6: HLS template + C-simulation + FPGA synthesis
-- Phase 7: heterogeneous partitioning
-- Phase 8: MicroGPU provider with SIMT bytecode interpreter
+- **Phase 2** — xDSL canonicalize + shape inference + fusion + dynamic-shape guards
+- **Phase 3** — ForgeRT memory planning upgrade (liveness + buffer reuse + ExecutionPlan allocations)
+- **Phase 4** — `astra` dialect + microcode ISA + functional & cycle-accurate simulators + provider + e2e
+- **Phase 5 (Triton path B + quantized + autotuning)** — separate plan
+- **Phase 6 (HLS template + C-simulation + FPGA synthesis)** — separate plan
+- **Phase 7 (heterogeneous partitioning)** — separate plan
+- **Phase 8** — microgpu dialect + SIMT bytecode interpreter + provider + e2e
 
 ## Quick start
 
