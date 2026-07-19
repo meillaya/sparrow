@@ -1,0 +1,7 @@
+# Tell clangd which C++ compiler drives the project so it picks up the
+# matching system include paths (libstdc++ <span>, <variant>, etc.).
+# Without QueryDriver clangd uses its own bundled resource dir which on
+# this host lacks the C++20 headers the runtime ABI uses.
+CompileFlags:
+  Add: [-std=c++20]
+  QueryDriver: /usr/bin/c++
