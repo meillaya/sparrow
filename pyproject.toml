@@ -108,7 +108,7 @@ python-version = "3.12"
 # ty expects project sources under src/ by default; Phase 1 keeps code at
 # the repo root (scripts/ + compiler/ + backends/ + frontend/) so we list
 # each top-level Python tree explicitly.
-root = [".", "scripts", "compiler", "backends", "frontend"]
+root = [".", "scripts", "compiler", "backends", "frontend", "frontend/python", "test"]
 
 [tool.ty.rules]
 # Possibly-unresolved-reference fires on dynamic imports (xdsl dialect
@@ -142,9 +142,9 @@ error-on-warning = false
 # Run from repo root (inside the venv): `pytest`
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-# `pythonpath = ["."]` lets the test files import top-level packages
+# `pythonpath = [".", "frontend/python"]` lets the test files import top-level packages
 # (`backends.*`, `frontend.*`, `compiler.*`) without needing the venv
 # activated or a conftest.py hack. Task 8 (FX importer) and Task 9 (Triton
 # path A kernel template) both rely on this.
-pythonpath = ["."]
+pythonpath = [".", "frontend/python"]
 testpaths = ["test"]
