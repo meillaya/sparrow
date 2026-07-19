@@ -1,6 +1,8 @@
 # runtime/tests/ — GoogleTest harness for ForgeRT.
 # Task 10 ships test_abi (ABI round-trip). Tasks 11/12 add
 # test_triton_provider and test_scheduler respectively.
+include(GoogleTest)
+
 add_executable(test_abi test_abi.cpp)
 target_link_libraries(test_abi
     PRIVATE
@@ -8,7 +10,7 @@ target_link_libraries(test_abi
         GTest::gtest
         GTest::gtest_main
 )
-add_test(NAME test_abi COMMAND test_abi)
+gtest_discover_tests(test_abi)
 
 # Task 11: TritonDeviceProvider + fused_gemm_bias_gelu CPU kernel.
 # Verifies allocate/release, kernel-vs-reference correctness, and the
@@ -21,7 +23,7 @@ target_link_libraries(test_triton_provider
         GTest::gtest
         GTest::gtest_main
 )
-add_test(NAME test_triton_provider COMMAND test_triton_provider)
+gtest_discover_tests(test_triton_provider)
 
 # Task 12 — ExecutionPlan JSON round-trip + topological scheduler
 # exercised via MockDeviceProvider (no real provider dependency).
@@ -32,7 +34,7 @@ target_link_libraries(test_scheduler
         GTest::gtest
         GTest::gtest_main
 )
-add_test(NAME test_scheduler COMMAND test_scheduler)
+gtest_discover_tests(test_scheduler)
 
 # Task 26 — LivenessAnalyzer (backward dataflow over ExecutionPlan).
 # Verifies the per-tensor [first_use, last_use] intervals on linear
@@ -44,7 +46,7 @@ target_link_libraries(test_liveness
         GTest::gtest
         GTest::gtest_main
 )
-add_test(NAME test_liveness COMMAND test_liveness)
+gtest_discover_tests(test_liveness)
 
 # Task 27 — BufferReuseAllocator (first-fit-decreasing layout).
 # Verifies non-overlapping ranges share offsets and overlapping ranges
@@ -56,7 +58,7 @@ target_link_libraries(test_buffer_reuse
         GTest::gtest
         GTest::gtest_main
 )
-add_test(NAME test_buffer_reuse COMMAND test_buffer_reuse)
+gtest_discover_tests(test_buffer_reuse)
 
 # Task 28 — MemoryPlanner (orchestrates Liveness + BufferReuse, mutates
 # plan.allocations). Single end-to-end test on a 4-node diamond plan
@@ -68,4 +70,14 @@ target_link_libraries(test_memory_planner
         GTest::gtest
         GTest::gtest_main
 )
-add_test(NAME test_memory_planner COMMAND test_memory_planner)
+gtest_discover_tests(test_memory_planner)
+
+# Task 32 — AllocationDefinition's byte layout survives ExecutionPlan JSON.
+add_executable(test_execution_plan test_execution_plan.cpp)
+target_link_libraries(test_execution_plan
+    PRIVATE
+        forgestack::runtime
+        GTest::gtest
+        GTest::gtest_main
+)
+gtest_discover_tests(test_execution_plan)
