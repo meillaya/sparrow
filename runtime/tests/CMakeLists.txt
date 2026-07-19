@@ -45,3 +45,15 @@ target_link_libraries(test_liveness
         GTest::gtest_main
 )
 add_test(NAME test_liveness COMMAND test_liveness)
+
+# Task 27 — BufferReuseAllocator (first-fit-decreasing layout).
+# Verifies non-overlapping ranges share offsets and overlapping ranges
+# get distinct offsets. Depends on liveness.hpp for LiveRange.
+add_executable(test_buffer_reuse test_buffer_reuse.cpp)
+target_link_libraries(test_buffer_reuse
+    PRIVATE
+        forgestack::runtime
+        GTest::gtest
+        GTest::gtest_main
+)
+add_test(NAME test_buffer_reuse COMMAND test_buffer_reuse)

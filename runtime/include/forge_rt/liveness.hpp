@@ -24,10 +24,19 @@ namespace forge_rt {
 // that are written by exactly one node and never read again (DCE
 // candidates in a later phase) are still reported — Phase 3 conservatively
 // keeps them so a downstream planner pass can decide to drop them.
+//
+// `byte_size` is the planner footprint: numel * kByteSize(dtype), with
+// Int4's packing applied. LivenessAnalyzer::analyze leaves it at 0;
+// the BufferReuseAllocator / MemoryPlanner stamp it from
+// compute_byte_sizes before sorting. We keep it on LiveRange (rather
+// than in a parallel vector) because the buffer-reuse algorithm sorts
+// ranges by `(last_use - first_use, byte_size)` DESC and a single
+// struct keeps the sort comparator and the place-pass honest.
 struct LiveRange {
     TensorId id = 0;
     NodeId   first_use = 0;
     NodeId   last_use  = 0;
+    uint64_t byte_size = 0;
 };
 
 // Computes a LiveRange for every tensor in `plan.tensors`. The returned
