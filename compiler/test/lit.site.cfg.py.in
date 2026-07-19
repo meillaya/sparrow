@@ -1,0 +1,14 @@
+# lit.site.cfg.py.in — template for the per-build lit configuration.
+#
+# CMake / Meson would substitute the placeholders when configuring the build
+# directory. We don't use a build directory (Phase 1 runs lit directly from
+# the source tree), so the placeholders are filled in by lit.cfg.py itself
+# using the location of this file.
+
+@LIT_SITE_CFG_IN_FROZEN@
+
+# Phase 1 has no separate build dir; the source tree IS the configuration.
+config.test_source_root = "@LIT_SITE_CFG_IN_SOURCE_DIR@"
+config.test_exec_root = "@LIT_SITE_CFG_IN_BINARY_DIR@"
+config.forge_opt = "@LIT_SITE_CFG_IN_BINARY_DIR@/tools/forge-opt/forge_opt.py"
+config.python_executable = "@LIT_SITE_CFG_IN_PYTHON_EXECUTABLE@"
