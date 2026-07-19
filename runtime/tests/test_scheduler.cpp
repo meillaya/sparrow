@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -32,8 +33,6 @@ using forge_rt::LaunchParameters;
 using forge_rt::MemorySpace;
 using forge_rt::MockDeviceProvider;
 using forge_rt::NodeId;
-using forge_rt::PlanInput;
-using forge_rt::PlanOutput;
 using forge_rt::Scheduler;
 using forge_rt::TensorDefinition;
 using forge_rt::TensorId;
@@ -94,6 +93,35 @@ ExecutableNode MakeNode(NodeId id, std::vector<TensorId> in,
     n.launch = DefaultLaunch();
     return n;
 }
+
+class OffsetRecordingProvider final : public MockDeviceProvider {
+public:
+    const std::vector<std::string>& offset_log() const noexcept {
+        return offset_log_;
+    }
+
+    forge_rt::Result<forge_rt::Event> launch(
+        const forge_rt::ArtifactDescriptor& artifact,
+        std::span<const Buffer> inputs,
+        std::span<Buffer> outputs,
+        std::span<const forge_rt::Event> deps) override {
+        std::string entry = artifact.entry_point + " inputs=";
+        for (std::size_t index = 0; index < inputs.size(); ++index) {
+            if (index > 0) entry += ",";
+            entry += std::to_string(inputs[index].spec().descriptor.byte_offset);
+        }
+        entry += " outputs=";
+        for (std::size_t index = 0; index < outputs.size(); ++index) {
+            if (index > 0) entry += ",";
+            entry += std::to_string(outputs[index].spec().descriptor.byte_offset);
+        }
+        offset_log_.push_back(std::move(entry));
+        return MockDeviceProvider::launch(artifact, inputs, outputs, deps);
+    }
+
+private:
+    std::vector<std::string> offset_log_;
+};
 
 }  // namespace
 
@@ -321,4 +349,46 @@ TEST(Scheduler_cycle, ReturnsErrorAndSkipsLaunchOnCyclicPlan) {
 
     // No provider launches should have happened.
     EXPECT_TRUE(mock->call_log().empty());
+}
+
+TEST(Scheduler, UsesMemoryPlannerAllocations) {
+    ExecutionPlan plan;
+    plan.name = "fused_mlp_offsets";
+    plan.tensors = {
+        MakeTensor(0, "x", {4}),
+        MakeTensor(1, "weight", {8}),
+        MakeTensor(2, "bias", {2}),
+        MakeTensor(3, "matmul", {8}),
+        MakeTensor(4, "gelu", {8}),
+        MakeTensor(5, "y", {8}),
+    };
+    plan.allocations = {
+        MakeAlloc(0, 16),
+        MakeAlloc(1, 32),
+        MakeAlloc(2, 8),
+        MakeAlloc(5, 32),
+    };
+    plan.nodes = {
+        MakeNode(0, {0, 1, 2}, {3}, {}),
+        MakeNode(1, {3}, {4}, {0}),
+        MakeNode(2, {4}, {5}, {1}),
+    };
+    plan.inputs = {{0, "x"}, {1, "weight"}, {2, "bias"}};
+    plan.outputs = {{5, "y"}};
+
+    auto provider = std::make_shared<OffsetRecordingProvider>();
+    Scheduler scheduler({provider});
+    std::vector<Buffer> inputs = MakeBuffers<3>();
+    std::vector<Buffer> outputs = MakeBuffers<1>();
+
+    auto result = scheduler.execute(plan, inputs, outputs);
+
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    const std::vector<std::string> expected = {
+        "node 0 inputs=128,64,192 outputs=0",
+        "node 1 inputs=0 outputs=64",
+        "node 2 inputs=64 outputs=0",
+    };
+    EXPECT_EQ(provider->offset_log(), expected);
+    RecordProperty("offset_log", "128,64,192->0;0->64;64->0");
 }

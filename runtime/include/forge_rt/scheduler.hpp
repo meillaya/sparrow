@@ -30,14 +30,16 @@ public:
     // vector is the simplest contract.
     explicit Scheduler(std::vector<std::shared_ptr<DeviceProvider>> providers);
 
-    // Walk `plan` to completion. `inputs` and `outputs` are passed
-    // by reference (not by value) because Buffer is move-only and we
-    // need to swap into the live buffer table in place.
+    // Walk `plan` to completion. MemoryPlanner::plan runs first and
+    // rewrites plan.allocations with the byte offsets used for every
+    // provider-facing Buffer. `inputs` and `outputs` are passed by
+    // reference (not by value) because Buffer is move-only and we need
+    // to swap into the live buffer table in place.
     //
     // Returns a vector of Events, one per PlanOutput, in plan.outputs
     // order. Callers can wait on them individually or chain them
     // into downstream ForgeRT runs.
-    Result<std::vector<Event>> execute(const ExecutionPlan& plan,
+    Result<std::vector<Event>> execute(ExecutionPlan& plan,
                                        std::vector<Buffer>& inputs,
                                        std::vector<Buffer>& outputs);
 

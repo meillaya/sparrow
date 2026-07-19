@@ -25,10 +25,9 @@
 //   extra move is free.
 #include "forge_rt/scheduler.hpp"
 
-#include "forge_rt/abi_types.hpp"
 #include "forge_rt/artifact_descriptor.hpp"
+#include "forge_rt/memory_planner.hpp"
 
-#include <chrono>
 #include <deque>
 #include <span>
 #include <unordered_map>
@@ -65,9 +64,50 @@ Error cycle_error() {
 
 }  // namespace
 
-Result<std::vector<Event>> Scheduler::execute(const ExecutionPlan& plan,
+Result<std::vector<Event>> Scheduler::execute(ExecutionPlan& plan,
                                               std::vector<Buffer>& inputs,
                                               std::vector<Buffer>& outputs) {
+    auto planning_result = MemoryPlanner::plan(plan);
+    if (!planning_result.ok()) {
+        return Error{"memory planning failed: " + planning_result.error().message,
+                     -10};
+    }
+
+    std::unordered_map<TensorId, const TensorDefinition*> tensor_definitions;
+    tensor_definitions.reserve(plan.tensors.size() * 2 + 1);
+    for (const TensorDefinition& tensor : plan.tensors) {
+        tensor_definitions.emplace(tensor.id, &tensor);
+    }
+    std::unordered_map<TensorId, const AllocationDefinition*> allocation_definitions;
+    allocation_definitions.reserve(plan.allocations.size() * 2 + 1);
+    for (const AllocationDefinition& allocation : plan.allocations) {
+        allocation_definitions.emplace(allocation.tensor_id, &allocation);
+    }
+    auto apply_planned_spec = [&](TensorId tid, Buffer& buffer) -> Result<void> {
+        const auto tensor_it = tensor_definitions.find(tid);
+        if (tensor_it == tensor_definitions.end()) {
+            return Error{"tensor " + std::to_string(tid) +
+                             " is missing from plan.tensors",
+                         -16};
+        }
+        const auto allocation_it = allocation_definitions.find(tid);
+        if (allocation_it == allocation_definitions.end()) {
+            return Error{"tensor " + std::to_string(tid) +
+                             " is missing from plan.allocations",
+                         -17};
+        }
+        const TensorDefinition& tensor = *tensor_it->second;
+        const AllocationDefinition& allocation = *allocation_it->second;
+        BufferSpec& spec = buffer.spec();
+        spec.descriptor.dtype = tensor.dtype;
+        spec.descriptor.shape = tensor.shape;
+        spec.descriptor.memory_space = allocation.memory_space;
+        spec.descriptor.byte_offset = allocation.byte_offset;
+        spec.byte_size = allocation.byte_size;
+        spec.alignment = allocation.alignment;
+        return Result<void>{};
+    };
+
     // 1. Dense tables, indexed by TensorId / NodeId. We size them
     //    once and rely on bound checks at every access.
     std::vector<Buffer> buffer_table(table_size(plan));
@@ -216,6 +256,10 @@ Result<std::vector<Event>> Scheduler::execute(const ExecutionPlan& plan,
                                  std::to_string(tid),
                              -23};
             }
+            auto spec_result = apply_planned_spec(tid, buffer_table[tid]);
+            if (!spec_result.ok()) {
+                return spec_result.error();
+            }
             in_ids.push_back(tid);
             in_bufs.push_back(std::move(buffer_table[tid]));
             if (tid < event_table.size()) {
@@ -236,6 +280,10 @@ Result<std::vector<Event>> Scheduler::execute(const ExecutionPlan& plan,
                                  " has out-of-range output tensor " +
                                  std::to_string(tid),
                              -24};
+            }
+            auto spec_result = apply_planned_spec(tid, buffer_table[tid]);
+            if (!spec_result.ok()) {
+                return spec_result.error();
             }
             out_ids.push_back(tid);
             out_bufs.push_back(std::move(buffer_table[tid]));
