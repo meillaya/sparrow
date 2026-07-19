@@ -132,3 +132,49 @@ def test_cache_store_disk_persists_across_instances() -> None:
     assert fresh == payload
     # The reader's memory tier now contains the entry.
     assert key.hexdigest() in reader._memory
+
+
+def test_cache_key_changes_with_constraints() -> None:
+    """Different constraint tuples hash to different keys (spec §13 / Task 16).
+
+    Same graph + same target/arch/dtype/schedule but different symbolic-dim
+    constraints must produce distinct cache buckets so the dynamic-compile
+    pipeline can specialise per-shape without trampling.
+    """
+    base = make_cache_key(graph_hash="dyn-mlp")
+    with_b_s = make_cache_key(
+        graph_hash="dyn-mlp",
+        symbolic_constraints=("B >= 1", "S >= 1"),
+    )
+    with_k = make_cache_key(
+        graph_hash="dyn-mlp",
+        symbolic_constraints=("K == 4096",),
+    )
+    none_constraints = make_cache_key(graph_hash="dyn-mlp", symbolic_constraints=())
+
+    # Each tuple is distinct from every other.
+    assert base.hexdigest() != with_b_s.hexdigest()
+    assert base.hexdigest() != with_k.hexdigest()
+    assert with_b_s.hexdigest() != with_k.hexdigest()
+    # The empty-tuple case also differs from the static default (None == ())
+    # — both render to () on the wire, so the digest must match here.
+    assert base.hexdigest() == none_constraints.hexdigest()
+
+
+def test_cache_key_stable_for_same_constraints() -> None:
+    """The same constraint tuple hashes to the same digest across invocations.
+
+    Independent :func:`make_cache_key` calls with the same arguments must
+    produce identical :attr:`CacheKey.hexdigest` — the build path is
+    deterministic for the same key inputs.
+    """
+    constraints = ("B >= 1", "S >= 1", "K == 4096")
+    first = make_cache_key(graph_hash="replay", symbolic_constraints=constraints)
+    # Reorder the constraint list — list is heterogeneous but the call site
+    # may pass either order; the JSON canonical form sorts keys so the
+    # ordering inside the tuple still has to match.
+    second = make_cache_key(graph_hash="replay", symbolic_constraints=tuple(constraints))
+    third = make_cache_key(graph_hash="replay", symbolic_constraints=tuple(constraints))
+    assert first.hexdigest() == second.hexdigest() == third.hexdigest()
+    # And of course the bundled key carries the constraints through.
+    assert first.symbolic_constraints == tuple(constraints)
