@@ -193,9 +193,7 @@ class TileShape(ParametrizedAttribute):
     def verify(self) -> None:
         for name, attr in (("m", self.m), ("n", self.n), ("k", self.k)):
             if attr.data < 1:
-                raise VerifyException(
-                    f"tile dimensions must be positive ({name}={attr.data})"
-                )
+                raise VerifyException(f"tile dimensions must be positive ({name}={attr.data})")
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +229,7 @@ class PipelineStages(ParametrizedAttribute):
 
     def verify(self) -> None:
         if self.n.data < 1:
-            raise VerifyException(
-                f"pipeline stages must be at least 1, got {self.n.data}"
-            )
+            raise VerifyException(f"pipeline stages must be at least 1, got {self.n.data}")
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +283,7 @@ class TiledGemmOp(IRDLOperation):
     # `tile` is required; `loop` / `stages` are optional with defaults.
     # Route all three through attr-dict so the assembly format stays simple.
     irdl_options = (ParsePropInAttrDict(),)
-    assembly_format = (
-        "$a `,` $b attr-dict `:` `(` type($a) `,` type($b) `)` `->` type($out)"
-    )
+    assembly_format = "$a `,` $b attr-dict `:` `(` type($a) `,` type($b) `)` `->` type($out)"
 
     def __init__(
         self,
@@ -327,8 +321,7 @@ class TiledGemmOp(IRDLOperation):
         b_t = _check_tensor(self.b, "forge.schedule.tiled_gemm operand 'b'")
         if not isinstance(self.out.type, TensorType):
             raise VerifyException(
-                "forge.schedule.tiled_gemm result must be !forge.tensor, "
-                f"got {self.out.type}"
+                f"forge.schedule.tiled_gemm result must be !forge.tensor, got {self.out.type}"
             )
         if a_t.get_dtype() != b_t.get_dtype():
             raise VerifyException(
