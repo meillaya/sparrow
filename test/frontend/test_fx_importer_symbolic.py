@@ -21,7 +21,6 @@ Three tests pin the symbolic-dim path added by Task 15:
 
 from __future__ import annotations
 
-import pytest
 import torch
 from forge_torch.conftest import FusedMLP
 from forge_torch.fx_importer import FxImporter

@@ -125,16 +125,10 @@ class SymbolicConstraint(ParametrizedAttribute):
                 )
                 raise  # pragma: no cover
             if not parser.parse_optional_punctuation(","):
-                parser.raise_error(
-                    "expected ',' after symbolic constraint name, then kind, value"
-                )
-            kind_ident = parser.parse_identifier(
-                "expected symbolic constraint kind identifier"
-            )
+                parser.raise_error("expected ',' after symbolic constraint name, then kind, value")
+            kind_ident = parser.parse_identifier("expected symbolic constraint kind identifier")
             try:
-                kind_attr_obj = SymbolicConstraintKindAttr(
-                    SymbolicConstraintKind(kind_ident)
-                )
+                kind_attr_obj = SymbolicConstraintKindAttr(SymbolicConstraintKind(kind_ident))
             except ValueError:
                 parser.raise_error(
                     f"unknown symbolic constraint kind {kind_ident!r} "
@@ -159,9 +153,7 @@ class SymbolicConstraint(ParametrizedAttribute):
                 )
                 raise  # pragma: no cover
             if int_value < 0:
-                parser.raise_error(
-                    f"symbolic_constraint value must be >= 0, got {int_value}"
-                )
+                parser.raise_error(f"symbolic_constraint value must be >= 0, got {int_value}")
             value_attr: Attribute = IntAttr(int_value)
         return [name_token, kind_attr_obj, value_attr]
 
@@ -189,13 +181,10 @@ class SymbolicConstraint(ParametrizedAttribute):
             )
         if not isinstance(self.value, IntAttr):
             raise VerifyException(
-                f"symbolic_constraint value must be an IntAttr, got "
-                f"{type(self.value).__name__}"
+                f"symbolic_constraint value must be an IntAttr, got {type(self.value).__name__}"
             )
         if self.value.data < 0:
-            raise VerifyException(
-                f"symbolic_constraint value must be >= 0, got {self.value.data}"
-            )
+            raise VerifyException(f"symbolic_constraint value must be >= 0, got {self.value.data}")
 
 
 def _is_symbolic_dim(name: str) -> bool:

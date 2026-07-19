@@ -107,11 +107,7 @@ def _run_forge_opt(mlir_text: str) -> str:
     driver produced (or the original MLIR on failure).
     """
     driver = (
-        Path(__file__).resolve().parents[3]
-        / "compiler"
-        / "tools"
-        / "forge-opt"
-        / "forge_opt.py"
+        Path(__file__).resolve().parents[3] / "compiler" / "tools" / "forge-opt" / "forge_opt.py"
     )
     if not driver.is_file():
         _logger.debug("forge-opt driver not found at %s; skipping optimize pass", driver)
@@ -188,10 +184,7 @@ def dynamic_compile(
     # re-trace so per-placeholder metadata mutations survive into the
     # captured graph and reach the importer — the path tests use to
     # inject ``tensor_meta['symbolic_dim']``).
-    if isinstance(model, GraphModule):
-        gm = model
-    else:
-        gm = torch.fx.symbolic_trace(model)
+    gm = model if isinstance(model, GraphModule) else torch.fx.symbolic_trace(model)
     importer = FxImporter(example_inputs)
     mlir_text = importer.import_graph(gm)
 
@@ -230,9 +223,7 @@ def dynamic_compile(
         target=target,
         arch=arch,
         dtype="fp32",
-        shape_constraints=(
-            "static" if not constraint_signature else f"dynamic_{bucket_hex[:8]}"
-        ),
+        shape_constraints=("static" if not constraint_signature else f"dynamic_{bucket_hex[:8]}"),
         schedule="schedule_64x128x32",
         symbolic_constraints=constraint_signature,
     )

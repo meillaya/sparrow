@@ -367,16 +367,12 @@ def _parse_constraint_list(parser: AttrParser) -> list[SymbolicConstraint]:
     while True:
         attr = parser.parse_attribute()
         if not isinstance(attr, SymbolicConstraint):
-            parser.raise_error(
-                f"expected #forge.symbolic_constraint, got {type(attr).__name__}"
-            )
+            parser.raise_error(f"expected #forge.symbolic_constraint, got {type(attr).__name__}")
         out.append(attr)
         if parser.parse_optional_punctuation("]") is not None:
             break
         if not parser.parse_optional_punctuation(","):
-            parser.raise_error(
-                "expected ',' or ']' inside forge.tensor constraint list"
-            )
+            parser.raise_error("expected ',' or ']' inside forge.tensor constraint list")
     return out
 
 
@@ -712,11 +708,10 @@ class ViewOp(IRDLOperation):
             raise VerifyException(f"view result must be !forge.tensor, got {self.out.type}")
         x_count = x_t.num_elements()
         out_count = self.out.type.num_elements()
-        if x_count is not None and out_count is not None:
-            if x_count != out_count:
-                raise VerifyException(
-                    f"view: element count mismatch ({x_count} input vs {out_count} output)"
-                )
+        if x_count is not None and out_count is not None and x_count != out_count:
+            raise VerifyException(
+                f"view: element count mismatch ({x_count} input vs {out_count} output)"
+            )
         # Symbolic dims present in either shape: skip the element-count
         # check (it can't fire symbolically) and require the rank +
         # rank-product dim structure to agree instead. This lets the FX
@@ -749,10 +744,8 @@ class SymbolicGuardOp(IRDLOperation):
     out = result_def(TensorType)
     constraint = prop_def(SymbolicConstraint)
 
-    irdl_options = [ParsePropInAttrDict()]
-    assembly_format = (
-        "$input attr-dict `:` `(` type($input) `)` `->` type($out)"
-    )
+    irdl_options = (ParsePropInAttrDict(),)
+    assembly_format = "$input attr-dict `:` `(` type($input) `)` `->` type($out)"
 
     def __init__(
         self,

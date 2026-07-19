@@ -473,15 +473,13 @@ def _broadcast(shape_a: list, shape_b: list):
             out.append(a)
         elif a == 1:
             out.append(b)
-        elif b == 1:
-            out.append(a)
-        elif isinstance(a, str) and a == b:
+        elif b == 1 or (isinstance(a, str) and a == b):
             out.append(a)
         elif isinstance(b, str) and a == 1:
             out.append(b)
-        elif isinstance(a, str) and b == 1:
-            out.append(a)
-        elif isinstance(a, str) and isinstance(b, str) and a == b:
+        elif (isinstance(a, str) and b == 1) or (
+            isinstance(a, str) and isinstance(b, str) and a == b
+        ):
             out.append(a)
         else:
             return None
