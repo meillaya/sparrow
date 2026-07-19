@@ -33,3 +33,15 @@ target_link_libraries(test_scheduler
         GTest::gtest_main
 )
 add_test(NAME test_scheduler COMMAND test_scheduler)
+
+# Task 26 — LivenessAnalyzer (backward dataflow over ExecutionPlan).
+# Verifies the per-tensor [first_use, last_use] intervals on linear
+# and diamond plans. Header-only dep on execution_plan.hpp.
+add_executable(test_liveness test_liveness.cpp)
+target_link_libraries(test_liveness
+    PRIVATE
+        forgestack::runtime
+        GTest::gtest
+        GTest::gtest_main
+)
+add_test(NAME test_liveness COMMAND test_liveness)

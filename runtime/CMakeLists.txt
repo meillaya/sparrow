@@ -14,6 +14,7 @@ add_library(forgestack_runtime STATIC
     lib/forge_rt.cpp
     lib/providers/triton_provider.cpp
     lib/execution_plan.cpp
+    lib/liveness.cpp
     lib/scheduler.cpp
 )
 
