@@ -1,9 +1,9 @@
 // RUN: %forge-opt %s --action=lower | %FileCheck %s
 
-// Phase-1 golden test for the GraphToTensor conversion pass. Mirrors the
+// Golden test for the GraphToTensor conversion pass. Mirrors the
 // FusedMLP vertical slice from the plan: `matmul + bias + gelu` should
 // lower 1:1 into `forge.tensor.{gemm, broadcast_add, gelu}` with no
-// fusion (the spec §5 `forge.tensor.fusion` region is a Phase 2 op).
+// cross-op fusion.
 //
 // FileCheck expectations:
 //   * function name preserved (@fused_mlp_lowered)

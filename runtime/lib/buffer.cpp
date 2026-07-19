@@ -7,11 +7,11 @@ namespace forge_rt {
 
 Buffer::~Buffer() {
     if (owns_ && data_ != nullptr) {
-        // Phase 1: CPU provider uses posix_memalign/malloc; the default
-        // deleter is std::free. Phase 5 (Triton/CUDA provider) wraps the
-        // raw pointer in a cuda-allocated Buffer and is responsible for
-        // setting owns_=false — the CUDA provider's release path will
-        // call cudaFree. Spec §20 forbids replacing the CUDA allocator.
+        // CPU provider uses posix_memalign/malloc; the default deleter
+        // is std::free. The Triton/CUDA provider wraps the raw pointer
+        // in a cuda-allocated Buffer and is responsible for setting
+        // owns_=false — its release path will call cudaFree. Spec §20
+        // forbids replacing the CUDA allocator.
         std::free(data_);
         data_ = nullptr;
     }

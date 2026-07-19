@@ -22,8 +22,9 @@ func.func @bad_gemm(
 // "error: …" prefix.
 
 // CHECK-ERR: unknown activation 'bogus'
-func.func @bad_activation() -> !forge.tensor<2x512xf32> {
-    %x = "forge.tensor.constant"() {value = dense<0.0> : tensor<2x512xf32>} : () -> !forge.tensor<2x512xf32>
+func.func @bad_activation(
+    %x: !forge.tensor<2x512xf32>
+) -> !forge.tensor<2x512xf32> {
     %0 = forge.tensor.fused_epilogue %x {activation = #forge.activation<bogus>} : (!forge.tensor<2x512xf32>) -> !forge.tensor<2x512xf32>
     return %0 : !forge.tensor<2x512xf32>
 }

@@ -20,6 +20,9 @@ echo
 
 # Step 1: C++ build + tests
 echo "[ci] Step 1: CMake configure + build"
+# Wipe stale build dir if it was configured with a different generator
+# (or is partial) so the configure step below is always consistent.
+rm -rf build
 cmake -B build -S . -G Ninja
 echo "[ci] Step 1: C++ test binaries"
 cmake --build build

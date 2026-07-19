@@ -1,13 +1,11 @@
-"""Triton JIT compile + launch wrapper (Phase 1: thin shim over the kernel module).
+"""Triton JIT compile + launch wrapper (thin shim over the kernel module).
 
-Phase 1 provides the public launch entry point used by the Triton provider
-(Task 11) and a trivial `JITLauncher.compile` shim that forwards to
-`triton.compile`. Phase 5 will:
-
-* cache compiled kernels by signature,
-* invalidate the cache when the codegen changes,
-* expose the kernel artifact (source + compile-time constants + launch grid +
-  argument mapping + shape guards + workspace) per spec §7.
+The shipped scope provides the public launch entry point used by the
+Triton provider (Task 11) and a trivial `JITLauncher.compile` shim that
+forwards to `triton.compile`. Per spec §7 the kernel artifact surface
+(source + compile-time constants + launch grid + argument mapping +
+shape guards + workspace) is owned by this module; the shipped kernel
+emits the canonical template via the codegen stub.
 
 Spec reference: .omo/plans/forgestack.md §7, §20.
 """
@@ -37,17 +35,19 @@ def launch_fused_gemm_bias_gelu(
 
 
 class JITLauncher:
-    """Phase 1: trivial wrapper. Phase 5 caches compiled kernels by signature."""
+    """Thin wrapper around ``triton.compile`` for the shipped kernel."""
 
     @staticmethod
     def compile(kernel_src: str, signature: str, *, target: str = "cuda"):
         """Compile a Triton kernel source string.
 
-        `signature` is reserved for Phase 5; Phase 1 only forwards `kernel_src`
-        and `target` to `triton.compile`. Per spec §20 we never expose the
-        Triton internal IR — only the compiled-kernel handle is returned.
+        The ``signature`` parameter is accepted for API forward-compatibility
+        but is not used by the shipped shim; only ``kernel_src`` and
+        ``target`` are forwarded to ``triton.compile``. Per spec §20 we
+        never expose the Triton internal IR — only the compiled-kernel
+        handle is returned.
         """
-        del signature  # unused in Phase 1
+        del signature  # accepted for forward-compat; not used today
         import triton
 
         return triton.compile(kernel_src, target=target)

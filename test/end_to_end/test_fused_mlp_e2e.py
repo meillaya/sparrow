@@ -4,13 +4,12 @@ Builds the FusedMLP model, runs eager, runs through
 ``torch.compile(backend="forgestack")``, asserts the validation result
 passes for at least 3 random shapes (spec §19).
 
-Phase 1 ships with the compiled path still delegating to the eager
-kernel (the pybind11 binding to ``TritonProvider`` lands in Phase 5),
-so the differential test confirms the *pipeline* — FX capture, MLIR
-import, lowering, ExecutionPlan build, scheduler dispatch — produces
-a tensor that numerically matches eager. The C++ scheduler + provider
-are exercised independently via ``runtime/tests/test_scheduler`` and
-``runtime/tests/test_triton_provider`` (Tasks 11/12).
+The shipped scope keeps the compiled path delegating to the eager
+kernel, so the differential test confirms the *pipeline* — FX capture,
+MLIR import, lowering, ExecutionPlan build, scheduler dispatch —
+produces a tensor that numerically matches eager. The C++ scheduler +
+provider are exercised independently via ``runtime/tests/test_scheduler``
+and ``runtime/tests/test_triton_provider`` (Tasks 11/12).
 """
 
 from __future__ import annotations

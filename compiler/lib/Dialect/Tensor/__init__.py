@@ -22,7 +22,6 @@ from collections.abc import Sequence
 from xdsl.dialects.builtin import BoolAttr
 from xdsl.ir import Dialect, EnumAttribute, SSAValue
 from xdsl.irdl import (
-    AnyAttr,
     IRDLOperation,
     ParsePropInAttrDict,
     irdl_attr_definition,
@@ -134,39 +133,6 @@ def _static_shape(t: TensorType) -> tuple[int, ...]:
         v = getattr(d, "data", None)
         out.append(v if isinstance(v, int) else -1)
     return tuple(out)
-
-
-# ---------------------------------------------------------------------------
-# Constant op
-# ---------------------------------------------------------------------------
-
-
-@irdl_op_definition
-class ConstantOp(IRDLOperation):
-    """
-    `forge.tensor.constant` — tensor literal. The ``value`` property is the
-    underlying xDSL builtin attribute (`DenseElementsAttr` for dense values,
-    `DenseResourceAttr` for resource-backed values). The result type pins
-    shape and dtype, mirroring MLIR's ``tensor<...>`` convention.
-    """
-
-    name = "forge.tensor.constant"
-    value = prop_def(AnyAttr())
-    result = result_def(TensorType)
-
-    traits = traits_def(Pure(), NoMemoryEffect())
-
-    assembly_format = "$value attr-dict `:` type($result)"
-
-    def __init__(self, value, result_type: TensorType):
-        super().__init__(properties={"value": value}, result_types=[result_type])
-
-    def verify_(self) -> None:
-        result_type = self.result.type
-        if not isinstance(result_type, TensorType):
-            raise VerifyException(
-                f"forge.tensor.constant result must be !forge.tensor, got {result_type}"
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +418,6 @@ class GeluOp(IRDLOperation):
 TensorDialect = Dialect(
     "forge.tensor",
     [
-        ConstantOp,
         GemmOp,
         FusedEpilogueOp,
         BroadcastAddOp,

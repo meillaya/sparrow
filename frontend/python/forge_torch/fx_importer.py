@@ -160,10 +160,7 @@ class FxImporter:
             elif node.op == "call_module" or node.op == "output":
                 continue
             elif node.op == "get_attr":
-                raise NotImplementedError(
-                    "FX get_attr nodes are not yet supported by ForgeTorch "
-                    "(Phase 2 lowers them to forge.tensor.constant)."
-                )
+                raise NotImplementedError("FX get_attr nodes are not yet supported by ForgeTorch.")
             else:
                 raise NotImplementedError(
                     f"unsupported FX node.op: {node.op!r} (target={node.target!r})"
@@ -386,8 +383,8 @@ def _arg_name(arg) -> str:
         return arg.name
     raise TypeError(
         f"unexpected FX argument: {arg!r}; only Node placeholders are "
-        "supported by the Phase 1 importer (constants and Python ints "
-        "arrive in Phase 2 as forge.tensor.constant)."
+        "supported by the shipped FX importer (constants and Python ints "
+        "are not yet lowered)."
     )
 
 

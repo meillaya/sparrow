@@ -2,20 +2,17 @@
 
 // ForgeRT — TritonDeviceProvider (spec §10, §7).
 //
-// Phase 1 "Triton" provider. It owns the host-side implementation of the
-// DeviceProvider interface for the Triton target and delegates every
-// launch into the C++ CPU reference kernel at
+// Shipped scope: the "Triton" provider owns the host-side implementation
+// of the DeviceProvider interface for the Triton target and delegates
+// every launch into the C++ CPU reference kernel at
 // `backends/triton/cpu/fused_gemm_bias_gelu`. Memory is host-resident
-// (MemorySpace::Host); Phase 5 replaces `launch` with a real pybind11 →
-// Triton kernel call and (optionally) Device0 allocations + cudaEvent_t
-// fences. The DeviceProvider ABI surface is locked, so the swap is
-// implementation-only.
+// (MemorySpace::Host). The DeviceProvider ABI surface is locked.
 //
 // Spec §20 hard rules honored by this provider:
 //   * Does NOT replace the CUDA allocator (we never allocate on Device0).
-//   * Does NOT expose the Triton internal IR — Phase 5 will return a
-//     compiled-kernel handle (see jit.py) and stop there.
-//   * launch MAY call into the C++ CPU kernel for Phase 1.
+//   * Does NOT expose the Triton internal IR — only a compiled-kernel
+//     handle (see jit.py) is returned.
+//   * launch calls into the C++ CPU reference kernel.
 #include <span>
 
 #include "forge_rt/device_provider.hpp"
@@ -33,32 +30,30 @@ public:
     // multiple of sizeof(void*)).
     Result<Buffer> allocate(const BufferSpec& spec) override;
 
-    // Copy `src` into `dst`. Phase 1 only supports Host↔Host copies;
-    // Device0/Device1 buffers return Error (Phase 5 widens this).
+    // Copy `src` into `dst`. Only Host↔Host copies are supported;
+    // Device0/Device1 buffers return Error.
     Result<Event> copy(Buffer& dst, const Buffer& src,
                        std::span<const Event> deps) override;
 
-    // Launch the compiled artifact. Phase 1 dispatches the
+    // Launch the compiled artifact. Dispatches the
     // `fused_gemm_bias_gelu` entry point into the C++ CPU reference
-    // kernel; Phase 5 replaces the body with a real pybind11 → Triton
-    // kernel call. The returned Event is marked completed on return
-    // (the CPU work is synchronous); Phase 5 will use a real fence.
+    // kernel. The returned Event is marked completed on return because
+    // the CPU work is synchronous.
     Result<Event> launch(const ArtifactDescriptor& artifact,
                          std::span<const Buffer> inputs,
                          std::span<Buffer> outputs,
                          std::span<const Event> deps) override;
 
-    // Wait is a no-op for Phase 1: every Event returned from
-    // copy/launch is already marked completed. Phase 5 will block on
-    // the underlying cudaEvent_t / HLS stream sync.
+    // Wait is a no-op today: every Event returned from copy/launch is
+    // already marked completed.
     Result<void> wait(const Event& event) override;
 
     MemorySpace memory_space() const override { return MemorySpace::Host; }
     TargetKind  target() const override { return TargetKind::Triton; }
 
 private:
-    // Monotonic event-id source. Phase 1 events are stubs; the id is
-    // only used by Event::wait for diagnostic messages.
+    // Monotonic event-id source. Events are stubs; the id is only used
+    // by Event::wait for diagnostic messages.
     uint64_t next_event_id_ = 1;
 };
 

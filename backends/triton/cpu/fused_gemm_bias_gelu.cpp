@@ -1,12 +1,8 @@
 // ForgeStack Triton backend — Path A, CPU reference kernel (spec §7).
 //
-// Phase 1: naive triple-loop in fp32 with bias + GELU fused. No threading,
-// no SIMD intrinsics — Phase 1 values correctness and readability. The
-// Phase 5 swap-in replaces this TU with a real pybind11 → Triton call,
-// but the public ABI in fused_gemm_bias_gelu.hpp is locked.
-//
-// SIMD/threading optimization is a Phase 2 follow-up; Phase 1 values
-// correctness and readability.
+// Shipped scope: naive triple-loop in fp32 with bias + GELU fused.
+// No threading, no SIMD intrinsics — the kernel values correctness and
+// readability. The public ABI in fused_gemm_bias_gelu.hpp is locked.
 #include "fused_gemm_bias_gelu.hpp"
 
 #include <cmath>
@@ -49,8 +45,7 @@ Result<void> run_fused_gemm_bias_gelu(const FusedGemmBiasGeluInputs& in) {
     // Kept as documentation of the contract; no runtime check needed here.
 
     // ---- compute ----
-    // SIMD/threading optimization is a Phase 2 follow-up; Phase 1 values
-    // correctness and readability.
+    // Naive triple-loop; correctness and readability over SIMD/threading.
     for (int64_t m = 0; m < in.M; ++m) {
         for (int64_t n = 0; n < in.N; ++n) {
             float acc = 0.0f;

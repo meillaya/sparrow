@@ -12,9 +12,10 @@ Spec §3 says ForgeTorch has six jobs:
 Phase 1 implements (1)-(3) with a thin (5) stub that delegates back to
 PyTorch eager. Task 14 layers (4) on top via the hierarchical cache
 described in spec §13, plus a (post-compile) observability report per
-spec §16. Job (6) needs the FX partitioning path that ships with
-Phase 2. ``CompiledFusedMLP.__call__`` is the eager stub the Phase-1
-test suite exercises.
+spec §16. Job (6) is not exercised by the shipped scope — the safe
+fallback path needs the FX partitioner, which is not part of the
+current implementation. ``CompiledFusedMLP.__call__`` is the eager
+stub the shipped test suite exercises.
 """
 
 from __future__ import annotations

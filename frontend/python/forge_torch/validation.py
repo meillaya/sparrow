@@ -121,9 +121,9 @@ def validate(
 
     aliasing_ok = True
     mutation_ok = True
-    # input_snapshot is reserved for the Phase 5 aliasing / mutation
-    # check; the compiled path is the eager stub in Phase 1, so neither
-    # field can fire today.
+    # The compiled path in the shipped scope is the eager stub; the
+    # aliasing/mutation check (using ``input_snapshot``) does not run
+    # yet, so neither field can fire today.
 
     tol = TOLERANCES.get(compiled_output.dtype, TOLERANCES[torch.float32])
     if shape_ok:

@@ -20,10 +20,9 @@
 //   for the duration of `provider->launch` (because std::span needs a
 //   contiguous range of T, and the table is non-contiguous). They
 //   are moved back into the table after the launch, so downstream
-//   nodes see the same in-place mutation the provider made. For
-//   Phase 1 host stub the buffers are essentially handle-swaps, so
-//   the extra move is free. Phase 5 keeps the same code; the only
-//   thing that changes is what "Buffer" carries (CUDA pointer).
+//   nodes see the same in-place mutation the provider made. For the
+//   shipped host stub the buffers are essentially handle-swaps, so the
+//   extra move is free.
 #include "forge_rt/scheduler.hpp"
 
 #include "forge_rt/abi_types.hpp"
@@ -182,8 +181,8 @@ Result<std::vector<Event>> Scheduler::execute(const ExecutionPlan& plan,
     //    which require a contiguous range. The buffer table is
     //    dense but indexed by TensorId, so we move the relevant
     //    rows into a temporary vector, span over it, launch, then
-    //    move them back. For Phase 1 (handle-only Buffer) the moves
-    //    are no-ops; for Phase 5 they're pointer swaps.
+    //    move them back. For the shipped handle-only Buffer the
+    //    moves are no-ops.
     for (NodeId nid : topo) {
         auto idx_it = node_index.find(nid);
         if (idx_it == node_index.end()) {
@@ -242,11 +241,11 @@ Result<std::vector<Event>> Scheduler::execute(const ExecutionPlan& plan,
             out_bufs.push_back(std::move(buffer_table[tid]));
         }
 
-        // Phase 5 will replace this stub. For now the launch entry
-        // point is just "node <id>" so the MockProvider can log it
-        // verbatim and a real TritonProvider can map it to a cached
-        // compilation. TargetKind comes from the provider so the
-        // dispatch table doesn't need a redundant plan field.
+        // The launch entry point is the string "node <id>" so the
+        // MockProvider can log it verbatim and the TritonProvider can
+        // map it to the cached compilation. TargetKind comes from the
+        // provider so the dispatch table doesn't need a redundant
+        // plan field.
         ArtifactDescriptor stub;
         stub.target = provider->target();
         stub.entry_point = "node " + std::to_string(node.id);
@@ -263,10 +262,10 @@ Result<std::vector<Event>> Scheduler::execute(const ExecutionPlan& plan,
         }
         Event produced = std::move(launch_res.value());
 
-        // All outputs become ready when the kernel completes. In
-        // Phase 1 we have one Event for the whole launch; Phase 5
-        // will split this into per-output fences (one Event per
-        // output buffer) once the real provider returns.
+        // All outputs become ready when the kernel completes. The
+        // shipped scope emits one Event for the whole launch and
+        // publishes it to every output tensor; a per-output fence
+        // granularity is not exercised today.
         for (TensorId tid : out_ids) {
             event_table[tid] = produced;
         }

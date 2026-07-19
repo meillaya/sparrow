@@ -2,11 +2,11 @@
 #
 # `forge.graph` → `forge.tensor` conversion pass (Task 7).
 #
-# Phase-1 lowering strategy: every `forge.graph.<op>` is rewritten 1:1 into
-# its `forge.tensor` equivalent. We deliberately do NOT do any cross-op
-# fusion here — the spec (§5) describes `forge.tensor.fusion { ... }` regions
-# as the future home for `gemm + bias + activation` style coalescing, and
-# that work belongs to Phase 2 (a separate pass operating on the lowered IR).
+# Lowering strategy: every `forge.graph.<op>` is rewritten 1:1 into its
+# `forge.tensor` equivalent. We deliberately do NOT do any cross-op
+# fusion here — the spec (§5) describes `forge.tensor.fusion { ... }`
+# regions as the home for `gemm + bias + activation` style coalescing,
+# which would be a separate pass operating on the lowered IR.
 #
 # This module wires four xDSL `RewritePattern`s (one per supported graph op)
 # into a `GreedyRewritePatternApplier` and drives them through a
@@ -28,9 +28,9 @@
 #         and elides the property entirely via `ParsePropInAttrDict`.)
 #
 #     forge.graph.view %x
-#         → left untouched (Phase 2 follow-up — the FusedMLP vertical slice
-#         does not use `view`; emitting `forge.tensor.reshape` would require
-#         a new op + verification, deferred.)
+#         → left untouched (the FusedMLP vertical slice does not use
+#         `view`; emitting `forge.tensor.reshape` would require a new
+#         op + verification, which is not part of the shipped scope.)
 #
 # Idempotency: no `RewritePattern` matches a `forge.tensor.*` op, so the pass
 # is a no-op when fed already-lowered IR. This is exercised explicitly by
@@ -165,13 +165,13 @@ class GeluToGeluPattern(RewritePattern):
 
 
 class ViewPassThroughPattern(RewritePattern):
-    """Leave ``forge.graph.view`` alone for Phase 1.
+    """Leave ``forge.graph.view`` alone in the shipped scope.
 
     The FusedMLP vertical slice never emits ``view``; lowering it would
     require either a brand-new ``forge.tensor.reshape`` op (with its own
     verifier and shape-inference story) or folding the reshape into a
-    downstream ``fused_epilogue``. Both are deferred to the Phase 2
-    follow-up. This pattern is intentionally empty — its presence in the
+    downstream ``fused_epilogue``. The shipped pass keeps the op
+    untouched. This pattern is intentionally empty — its presence in the
     applier signals intent (we considered the op and chose not to lower
     it) and keeps the applier shape consistent.
     """

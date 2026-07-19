@@ -1,13 +1,12 @@
 """Map PyTorch FX aten ops to forge.graph ops. Single source of truth for Task 8.
 
 The :func:`map_node_to_forge` helper centralises the (FX node target string) →
-(``forge.graph.<op>`` name + shape inference callable) translation. Both
-``fx_importer.FxImporter`` (which walks a captured ``torch.fx.GraphModule``) and
-the future partitioning/fallback layer (Phase 2 — see spec §3) consult this
-table; nothing else in ForgeTorch should re-derive the mapping.
+(``forge.graph.<op>`` name + shape inference callable) translation.
+``fx_importer.FxImporter`` (which walks a captured ``torch.fx.GraphModule``)
+consults this table; nothing else in ForgeTorch should re-derive the mapping.
 
-Supported ops (Phase 1)
------------------------
+Supported ops (shipped scope)
+-----------------------------
 ``aten.mm``  / ``aten.matmul`` → ``forge.graph.matmul``
 ``aten.add``                   → ``forge.graph.add``
 ``aten.gelu``                  → ``forge.graph.gelu``
@@ -16,12 +15,12 @@ Supported ops (Phase 1)
 
 Recognised-but-not-yet-implemented (raise :class:`NotImplementedError`)
 -----------------------------------------------------------------------
-``aten.relu`` / ``aten.silu`` / ``aten.mul`` — activations/elementwise; the
-graph dialect will grow ``forge.graph.{relu,silu,mul}`` in Phase 2 task 2.
-``aten.reshape`` / ``aten.permute`` / ``aten.transpose`` — Phase 2.
-``aten.sum`` / ``aten.mean`` — Phase 2 reductions.
-``aten.bmm`` / ``aten.baddbmm``                   — batched matmul, Phase 2+.
-``aten.layer_norm`` / ``aten.softmax``           — Phase 2+.
+``aten.relu`` / ``aten.silu`` / ``aten.mul`` — activations/elementwise;
+  the graph dialect currently stops at the four ops above.
+``aten.reshape`` / ``aten.permute`` / ``aten.transpose`` — not lowered today.
+``aten.sum`` / ``aten.mean`` — reductions, not lowered today.
+``aten.bmm`` / ``aten.baddbmm`` — batched matmul, not lowered today.
+``aten.layer_norm`` / ``aten.softmax`` — not lowered today.
 
 DType translation
 -----------------
@@ -59,7 +58,7 @@ UNSUPPORTED_BUT_RECOGNISED: frozenset[str] = frozenset(
         "aten.layer_norm",
         "aten.softmax",
         "aten.bmm",
-        "aten.baddbmm",  # batched matmul — Phase 2+
+        "aten.baddbmm",  # batched matmul, not lowered today
     }
 )
 
@@ -129,8 +128,7 @@ def map_node_to_forge(target: object) -> str:
     if normalized in UNSUPPORTED_BUT_RECOGNISED:
         msg = (
             f"{normalized!s} is recognised by the ForgeTorch frontend but "
-            f"not yet implemented in Phase 1 forge.graph; this op will land "
-            f"in Phase 2."
+            f"is not yet lowered by the shipped FX importer."
         )
         raise NotImplementedError(msg)
     raise KeyError(f"unknown FX op target: {target!r} (normalised to {normalized!r})")

@@ -22,8 +22,7 @@ target_include_directories(forgestack_runtime PUBLIC
     # TritonProvider::launch calls into backends/triton/cpu/. The kernel
     # header is a self-contained .hpp pair with no external deps, so the
     # runtime can reach in directly without dragging the kernel CMake
-    # target into the runtime's link line. Phase 5 may invert this if
-    # the kernel grows into a real pybind11/Triton module.
+    # target into the runtime's link line.
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../backends/triton/cpu>
 )
 

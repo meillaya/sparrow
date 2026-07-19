@@ -1,9 +1,9 @@
 // ForgeRT — TritonDeviceProvider implementation (spec §10, §7).
 //
-// Phase 1: every operation runs on the host. allocate uses
+// Shipped scope: every operation runs on the host. allocate uses
 // std::aligned_alloc, copy is std::memcpy, launch dispatches into the
-// C++ CPU reference kernel at backends/triton/cpu/. Phase 5 swaps the
-// internals without changing the DeviceProvider ABI.
+// C++ CPU reference kernel at backends/triton/cpu/. The DeviceProvider
+// ABI is the stable contract.
 #include "forge_rt/providers/triton_provider.hpp"
 
 #include <algorithm>
@@ -66,8 +66,7 @@ Result<Buffer> TritonProvider::allocate(const BufferSpec& spec) {
     // The caller asked for spec.byte_size; we allocated `alloc_size` to
     // satisfy std::aligned_alloc's alignment-multiple requirement. Update
     // the spec we hand to Buffer so downstream byte_size lookups reflect
-    // the actual allocation. (Phase 5 may switch to a posix_memalign-
-    // based path that doesn't have this constraint.)
+    // the actual allocation.
     BufferSpec out_spec = spec;
     out_spec.byte_size = bytes;
     out_spec.alignment = align;
@@ -80,12 +79,12 @@ Result<Event> TritonProvider::copy(Buffer& dst, const Buffer& src,
     if (src.spec().descriptor.memory_space != MemorySpace::Host ||
         dst.spec().descriptor.memory_space != MemorySpace::Host) {
         return Error{
-            "TritonProvider::copy: Phase 1 only supports Host↔Host copies "
+            "TritonProvider::copy: only Host↔Host copies are supported "
             "(got src=" +
                 std::string(to_string(src.spec().descriptor.memory_space)) +
                 " dst=" +
                 std::string(to_string(dst.spec().descriptor.memory_space)) +
-                "); Device0/Device1 land in Phase 5",
+                "); Device0/Device1 buffers are rejected by the shipped provider",
             2010};
     }
 
@@ -101,7 +100,7 @@ Result<Event> TritonProvider::copy(Buffer& dst, const Buffer& src,
     std::memcpy(dst.data(), src.data(), nbytes);
 
     Event ev{next_event_id_++};
-    ev.mark_completed();  // host copy is synchronous; Phase 5 uses cudaEvent_t
+    ev.mark_completed();  // host copy is synchronous
     return ev;
 }
 
@@ -206,14 +205,13 @@ Result<Event> TritonProvider::launch(const ArtifactDescriptor& artifact,
     }
 
     Event ev{next_event_id_++};
-    ev.mark_completed();  // CPU launch is synchronous; Phase 5 uses cudaEvent_t
+    ev.mark_completed();  // CPU launch is synchronous
     return ev;
 }
 
 Result<void> TritonProvider::wait(const Event& /*event*/) {
-    // Phase 1: every event is marked completed at issue time, so wait()
-    // is trivially satisfied. Phase 5 will block on cudaEvent_t or the
-    // matching HIP/HLS stream sync primitive.
+    // Every event is marked completed at issue time, so wait() is
+    // trivially satisfied.
     return Result<void>{};
 }
 

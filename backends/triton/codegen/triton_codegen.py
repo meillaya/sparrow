@@ -1,8 +1,8 @@
-"""emit_triton — generate Triton source from a forge.tensor region (Phase 5).
+"""emit_triton — return the canonical Triton source for the shipped kernel.
 
-Phase 1 is a STUB: it returns the canonical kernel source from
-fused_gemm_bias_gelu.py. Phase 5 will wire it up to actually read
-forge.tensor.gemm + forge.tensor.fused_epilogue regions and emit per-op kernels.
+The shipped scope is a stub: it returns the canonical kernel source from
+fused_gemm_bias_gelu.py so the codegen + JIT path is exercised end to end
+without per-op kernel synthesis.
 
 Reference: spec §7 Path A.
 """
@@ -15,10 +15,11 @@ KERNEL_PATH = Path(__file__).parent.parent / "kernels" / "fused_gemm_bias_gelu.p
 
 
 def emit_triton(region: str) -> str:
-    """Phase 1: return the canonical fused_gemm_bias_gelu kernel source.
+    """Return the canonical fused_gemm_bias_gelu kernel source.
 
-    The `region` argument is accepted for Phase-5 forward-compatibility but is
-    ignored today — Phase 1 only emits the canonical template.
+    The ``region`` argument is accepted for API forward-compatibility
+    but is ignored today — the shipped codegen only emits the canonical
+    template.
     """
-    del region  # unused in Phase 1
+    del region  # accepted for forward-compat; not used today
     return KERNEL_PATH.read_text()

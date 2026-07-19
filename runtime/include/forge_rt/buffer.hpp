@@ -22,7 +22,7 @@ public:
 
     // Construct from external memory. If `owns == true`, ~Buffer calls
     // free() on `data` — callers using CUDA / HLS allocators MUST register
-    // a custom provider (Phase 5) rather than passing owns=true.
+    // a custom provider instead of passing owns=true.
     Buffer(void* data, BufferSpec spec, bool owns = false)
         : data_(data), spec_(std::move(spec)), owns_(owns) {}
 

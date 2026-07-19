@@ -1,10 +1,9 @@
 #pragma once
 
 // ForgeRT C++ ABI — Event (spec §10).
-// Phase 1: CPU stub. The Event records "is this work item done?" and supports
-// `wait()` with a timeout. Phase 5 will replace this with real fences backed
-// by cudaEvent_t / HIP event / HLS stream sync. The ABI surface is locked —
-// only the implementation moves.
+// CPU stub: the Event records "is this work item done?" and supports
+// `wait()` with a timeout. The ABI surface is locked — only the
+// implementation moves.
 #include <cstdint>
 #include <chrono>
 #include "result.hpp"
