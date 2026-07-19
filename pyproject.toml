@@ -106,8 +106,9 @@ skip-magic-trailing-comma = false
 [tool.ty.environment]
 python-version = "3.12"
 # ty expects project sources under src/ by default; Phase 1 keeps code at
-# the repo root (scripts/ + compiler/) so we list them explicitly.
-root = [".", "scripts", "compiler"]
+# the repo root (scripts/ + compiler/ + backends/ + frontend/) so we list
+# each top-level Python tree explicitly.
+root = [".", "scripts", "compiler", "backends", "frontend"]
 
 [tool.ty.rules]
 # Possibly-unresolved-reference fires on dynamic imports (xdsl dialect
@@ -127,6 +128,11 @@ invalid-argument-type = "warn"
 unresolved-attribute = "warn"
 too-many-positional-arguments = "warn"
 invalid-assignment = "warn"
+# Triton's JITFunction[...]() binder uses a kwargs splat
+# (`kernel[grid](..., BLOCK_M=..., num_warps=...)`) that ty's generic stubs
+# don't model; the BLOCK_* / DTYPE kwargs are real constexpr params, and
+# `num_warps` / `num_stages` are launcher-level knobs the stubs omit.
+unknown-argument = "warn"
 
 [tool.ty.terminal]
 error-on-warning = false
@@ -136,4 +142,9 @@ error-on-warning = false
 # Run from repo root (inside the venv): `pytest`
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
+# `pythonpath = ["."]` lets the test files import top-level packages
+# (`backends.*`, `frontend.*`, `compiler.*`) without needing the venv
+# activated or a conftest.py hack. Task 8 (FX importer) and Task 9 (Triton
+# path A kernel template) both rely on this.
+pythonpath = ["."]
 testpaths = ["test"]
