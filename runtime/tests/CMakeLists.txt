@@ -57,3 +57,15 @@ target_link_libraries(test_buffer_reuse
         GTest::gtest_main
 )
 add_test(NAME test_buffer_reuse COMMAND test_buffer_reuse)
+
+# Task 28 — MemoryPlanner (orchestrates Liveness + BufferReuse, mutates
+# plan.allocations). Single end-to-end test on a 4-node diamond plan
+# verifying alignment, no-overlap, and pool-bounded high-water mark.
+add_executable(test_memory_planner test_memory_planner.cpp)
+target_link_libraries(test_memory_planner
+    PRIVATE
+        forgestack::runtime
+        GTest::gtest
+        GTest::gtest_main
+)
+add_test(NAME test_memory_planner COMMAND test_memory_planner)

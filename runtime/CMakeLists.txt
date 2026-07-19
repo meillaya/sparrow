@@ -16,6 +16,7 @@ add_library(forgestack_runtime STATIC
     lib/execution_plan.cpp
     lib/liveness.cpp
     lib/buffer_reuse.cpp
+    lib/memory_planner.cpp
     lib/scheduler.cpp
 )
 
