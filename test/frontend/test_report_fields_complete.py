@@ -24,7 +24,6 @@ brittle to whitespace changes in ``render()``.
 
 from __future__ import annotations
 
-import pytest
 import torch
 from forge_torch.conftest import FusedMLP
 from forge_torch.report import CompilationReport
@@ -45,7 +44,6 @@ def _capture_report_via_patch(tmp_path) -> tuple[CompilationReport, object]:
     is shared across tests and once warm, _emit_report is skipped.
     """
     from pathlib import Path
-
     from unittest.mock import patch
 
     from forge_torch.backend import compile
@@ -96,8 +94,7 @@ def test_report_has_mlir_op_count_per_pass(tmp_path) -> None:
     )
     assert isinstance(report.operations_after_canonicalize, int)
     assert report.operations_after_canonicalize > 0, (
-        f"operations_after_canonicalize must be > 0, got "
-        f"{report.operations_after_canonicalize}"
+        f"operations_after_canonicalize must be > 0, got {report.operations_after_canonicalize}"
     )
 
 
@@ -137,9 +134,7 @@ def test_report_schedule_has_all_tile_knobs(tmp_path) -> None:
     for key in ("tile_m", "tile_n", "tile_k", "warps", "stages"):
         assert key in schedule, f"schedule missing required key: {key}"
         value = schedule[key]
-        assert isinstance(value, int), (
-            f"schedule[{key!r}] must be int, got {type(value).__name__}"
-        )
+        assert isinstance(value, int), f"schedule[{key!r}] must be int, got {type(value).__name__}"
         assert value > 0, f"schedule[{key!r}] must be positive, got {value}"
     assert schedule["tile_m"] == 64
     assert schedule["tile_n"] == 128
@@ -152,12 +147,10 @@ def test_report_has_peak_intermediate_memory(tmp_path) -> None:
     """spec §16: both original + planned intermediate memory must be > 0."""
     report, _ = _capture_report_via_patch(tmp_path)
     assert report.original_intermediate_memory_mb > 0.0, (
-        f"original_intermediate_memory_mb must be > 0, got "
-        f"{report.original_intermediate_memory_mb}"
+        f"original_intermediate_memory_mb must be > 0, got {report.original_intermediate_memory_mb}"
     )
     assert report.planned_intermediate_memory_mb > 0.0, (
-        f"planned_intermediate_memory_mb must be > 0, got "
-        f"{report.planned_intermediate_memory_mb}"
+        f"planned_intermediate_memory_mb must be > 0, got {report.planned_intermediate_memory_mb}"
     )
     assert report.planned_intermediate_memory_mb <= report.original_intermediate_memory_mb, (
         f"planned ({report.planned_intermediate_memory_mb}) must be <= "
@@ -216,9 +209,7 @@ def test_report_full_completeness_single_check(tmp_path) -> None:
     }
     for field_name, (lo, hi) in required_ints.items():
         value = getattr(report, field_name)
-        assert isinstance(value, int), (
-            f"{field_name} must be int, got {type(value).__name__}"
-        )
+        assert isinstance(value, int), f"{field_name} must be int, got {type(value).__name__}"
         assert value >= lo, f"{field_name} must be ≥ {lo}, got {value}"
         if hi is not None:
             assert value <= hi, f"{field_name} must be ≤ {hi}, got {value}"
@@ -230,9 +221,7 @@ def test_report_full_completeness_single_check(tmp_path) -> None:
     }
     for field_name, (lo, hi) in required_floats.items():
         value = getattr(report, field_name)
-        assert isinstance(value, float), (
-            f"{field_name} must be float, got {type(value).__name__}"
-        )
+        assert isinstance(value, float), f"{field_name} must be float, got {type(value).__name__}"
         assert value >= lo, f"{field_name} must be ≥ {lo}, got {value}"
         if hi is not None:
             assert value <= hi, f"{field_name} must be ≤ {hi}, got {value}"
@@ -241,9 +230,7 @@ def test_report_full_completeness_single_check(tmp_path) -> None:
     for key in ("tile_m", "tile_n", "tile_k", "warps", "stages"):
         assert key in schedule, f"schedule missing required key: {key}"
         v = schedule[key]
-        assert isinstance(v, int) and v > 0, (
-            f"schedule[{key!r}] must be positive int, got {v!r}"
-        )
+        assert isinstance(v, int) and v > 0, f"schedule[{key!r}] must be positive int, got {v!r}"
 
     assert compiled.mlir_text  # The compiled call produced MLIR text.
     assert "forge.graph" in compiled.mlir_text

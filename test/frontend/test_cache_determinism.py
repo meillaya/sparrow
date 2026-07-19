@@ -22,7 +22,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
-from forge_torch.cache import make_cache_key
 from forge_torch.cache_store import CacheStore
 from forge_torch.conftest import FusedMLP
 
@@ -51,9 +50,7 @@ def test_cache_keys_stable_across_five_runs(tmp_path: Path) -> None:
         assert compiled.cache_key is not None
         digests.append(compiled.cache_key.hexdigest())
 
-    assert len(set(digests)) == 1, (
-        f"cache-key digest drifted across 5 runs: {digests}"
-    )
+    assert len(set(digests)) == 1, f"cache-key digest drifted across 5 runs: {digests}"
 
 
 def test_artifacts_byte_identical_across_five_runs(tmp_path: Path) -> None:
@@ -63,10 +60,6 @@ def test_artifacts_byte_identical_across_five_runs(tmp_path: Path) -> None:
     store = CacheStore(tmp_path / "cache")
     model = FusedMLP()
 
-    expected_key = make_cache_key(
-        graph_hash="placeholder",
-        dtype="fp32",
-    )
     artifact_path: Path | None = None
 
     for _ in range(5):
@@ -115,9 +108,6 @@ def test_mlir_text_byte_identical_across_five_runs(tmp_path: Path) -> None:
         compiled = compile(model, [x, w, b], cache_store=store)
         mlir_texts.append(compiled.mlir_text)
 
-    assert len(set(mlir_texts)) == 1, (
-        f"mlir_text drifted across 5 runs:\n"
-        + "\n----\n".join(mlir_texts[:3])
+    assert len(set(mlir_texts)) == 1, "mlir_text drifted across 5 runs:\n" + "\n----\n".join(
+        mlir_texts[:3]
     )
-
-

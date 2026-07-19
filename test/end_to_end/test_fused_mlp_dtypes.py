@@ -70,9 +70,7 @@ def test_fused_mlp_dtype_compiled_matches_eager(torch_dtype: torch.dtype) -> Non
     tol = TOLERANCES[torch_dtype]
     assert compiled_out.dtype == torch_dtype
     assert compiled_out.shape == eager_out.shape
-    assert torch.allclose(
-        compiled_out, eager_out, atol=tol["atol"], rtol=tol["rtol"]
-    ), (
+    assert torch.allclose(compiled_out, eager_out, atol=tol["atol"], rtol=tol["rtol"]), (
         f"compiled (eager-stub) output diverged from eager at {torch_dtype} "
         f"atol={tol['atol']} rtol={tol['rtol']}"
     )
@@ -137,6 +135,4 @@ def test_fused_mlp_dtype_cache_key_routes_per_dtype(tmp_path) -> None:
         assert compiled.cache_store is store
 
     digests = {dt: k.hexdigest() for dt, k in keys.items()}
-    assert len(set(digests.values())) == 3, (
-        f"expected 3 distinct cache digests, got {digests}"
-    )
+    assert len(set(digests.values())) == 3, f"expected 3 distinct cache digests, got {digests}"
