@@ -23,7 +23,12 @@ echo "[ci] Step 1: CMake configure + build"
 # Wipe stale build dir if it was configured with a different generator
 # (or is partial) so the configure step below is always consistent.
 rm -rf build
-cmake -B build -S . -G Ninja
+# Disable system FindGTest: on some hosts the system FindGTest.cmake resolves
+# to a stale nix-store path (e.g. freecad-1.1.1) that no longer exists. Force
+# FetchContent_MakeAvailable(googletest) instead — produces a fully self-
+# contained v1.17.0 build under build/_deps/, which works on every host.
+cmake -B build -S . -G Ninja \
+    -DCMAKE_DISABLE_FIND_PACKAGE_GTest=TRUE
 echo "[ci] Step 1: C++ test binaries"
 cmake --build build
 ctest --test-dir build --output-on-failure
