@@ -1,14 +1,33 @@
 """Tests for the Astra timing simulator."""
 
+# pyright: reportUnnecessaryComparison=false
+
 from __future__ import annotations
+
+import random
+from typing import Final, assert_never
 
 import numpy as np
 import pytest
 
 import backends.astra.sim as astra_sim
-from backends.astra.sim.functional import DRAM_BYTES, TILE_BYTES, TILE_DIM
+from backends.astra.sim.functional import (
+    DRAM_BYTES,
+    TILE_BYTES,
+    TILE_DIM,
+    run_functional,
+)
 from backends.astra.sim.timing import SimMetrics, run_timing
 from compiler.lib.Dialect.Astra.assembler import assemble
+from compiler.lib.Dialect.Astra.microcode import OpCode, encode
+
+_RANDOM_OPS: Final = (
+    OpCode.DMA_LOAD,
+    OpCode.DMA_STORE,
+    OpCode.MATMUL,
+    OpCode.VECTOR_GELU,
+    OpCode.NOP,
+)
 
 
 def test_timing_simulator_populates_metrics() -> None:
@@ -50,3 +69,54 @@ HALT
     assert np.allclose(functional, timing, atol=1e-4, rtol=0.0)
     assert functional_metrics is None
     assert timing_metrics is not None
+
+
+def _random_program(seed: int) -> list[int]:
+    rng = random.Random(seed)
+    words: list[int] = []
+    for _ in range(7):
+        opcode = rng.choice(_RANDOM_OPS)
+        sram_a = rng.randrange(8) * TILE_BYTES
+        sram_b = rng.randrange(8) * TILE_BYTES
+        dram_offset = rng.randrange(16) * TILE_BYTES
+        match opcode:
+            case OpCode.DMA_LOAD:
+                words.append(encode(opcode, sram_a, dram_offset, imm=TILE_BYTES))
+            case OpCode.DMA_STORE:
+                words.append(encode(opcode, dram_offset, sram_a, imm=TILE_BYTES))
+            case OpCode.MATMUL:
+                words.append(encode(opcode, sram_a, sram_b, imm=TILE_DIM))
+            case OpCode.VECTOR_GELU:
+                words.append(
+                    encode(
+                        opcode,
+                        sram_a,
+                        sram_b,
+                        imm=TILE_DIM * TILE_DIM,
+                    )
+                )
+            case OpCode.NOP:
+                words.append(encode(opcode, 0, 0))
+            case unreachable:
+                assert_never(unreachable)
+    words.extend(
+        (
+            encode(OpCode.DMA_STORE, 0, 0, imm=TILE_BYTES),
+            encode(OpCode.HALT, 0, 0),
+        )
+    )
+    return words
+
+
+@pytest.mark.parametrize("seed", [101, 202, 303, 404, 505])
+def test_random_microcode_functional_matches_timing_bytes(seed: int) -> None:
+    rng = random.Random(seed)
+    dram = bytearray(DRAM_BYTES)
+    dram[: 16 * TILE_BYTES] = rng.randbytes(16 * TILE_BYTES)
+    words = _random_program(seed)
+
+    functional = run_functional(words, dram=bytearray(dram))
+    timing, _ = run_timing(words, dram=bytearray(dram))
+
+    assert functional.dram_writes == timing.dram_writes
+    assert functional.sram == timing.sram
