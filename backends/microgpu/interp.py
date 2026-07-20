@@ -9,10 +9,12 @@ reference is also what the C++ :class:`forge_rt::MicroGpuProvider`
 ultimately delegates to (via subprocess), so the test surface lives
 here.
 
-Tasks 76/77/78 layer race detection, out-of-bounds detection, and
-the bytecode dep-DAG emitter on top of this file's run loop. The run
-function returns the final register file so the host (test, driver,
-provider) can inspect the post-state.
+This module layers race detection on top of the run loop (Task 76):
+it tracks per-register reads/writes and emits a :class:`RaceWarning`
+to ``stderr`` for WAR (write-after-read) and WAW (write-after-write
+with intervening read) hazards. Detection is best-effort and
+non-fatal; the interpreter still executes the offending program so
+the diagnostics surface without aborting the host process.
 
 Reference: spec §11.
 """
@@ -20,6 +22,7 @@ Reference: spec §11.
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -37,11 +40,16 @@ REGISTER_COUNT: Final = 32
 # Bytes per memory word (every LOAD/STORE moves exactly one i32).
 BYTES_PER_WORD: Final = 4
 
-# The sigmoid we expose is the standard logistic 1/(1+e^-x), which
-# matches the spec's ``SIGMOID`` op definition. The task uses this
-# function for both the reference numpy comparison and the runtime
-# behaviour.
-_LOGISTIC_DENOM: Final = 1.0
+
+class RaceWarning(UserWarning):
+    """Emitted on stderr for WAR/WAW register hazards (non-fatal)."""
+
+
+@dataclass(frozen=True, slots=True)
+class InterpreterState:
+    """Snapshot of the post-run register file."""
+
+    registers: tuple[int, ...]
 
 
 def _sigmoid(value: int) -> int:
@@ -57,17 +65,52 @@ def _sigmoid(value: int) -> int:
     return round(result)
 
 
-@dataclass(frozen=True, slots=True)
-class InterpreterState:
-    """Snapshot of the post-run register file."""
-
-    registers: tuple[int, ...]
-
-
 def _check_register(slot: int, what: str) -> None:
     """Reject register slots outside the 32-slot register file."""
     if not 0 <= slot < REGISTER_COUNT:
         raise ValueError(f"{what} register r{slot} out of range (0..31)")
+
+
+def _check_reg_race(
+    slot: int,
+    pc: int,
+    *,
+    reg_reads: set[int],
+    reg_writes_after_reads: set[int],
+    name: str,
+) -> None:
+    """Emit a :class:`RaceWarning` if ``slot`` participates in a WAR or WAW hazard.
+
+    WAR (write-after-read): ``slot`` was read earlier and is now being
+    written. The writer overwrites the value before some downstream
+    consumer observes the read result.
+
+    WAW (write-after-write with intervening read): ``slot`` was
+    written earlier AND read in between (the ``reg_writes_after_reads``
+    set), and is now being written again. Two writers with a read in
+    between means the second writer's value is observable only after
+    any concurrent reader has retired.
+
+    Both warnings are emitted independently when both hazards apply.
+    A plain WAW with no intervening read (e.g. ``LOAD_GLOBAL r0;
+    SIGMOID r0``) is the standard flow dependency and is NOT a race —
+    the previous write has no downstream readers, so the new write is
+    observably equivalent.
+    """
+    if slot in reg_reads:
+        warnings.warn(
+            f"WAR hazard at pc={pc} ({name}): r{slot} read earlier; "
+            f"the write now overwrites the source value before all readers retire",
+            RaceWarning,
+            stacklevel=3,
+        )
+    if slot in reg_writes_after_reads:
+        warnings.warn(
+            f"WAW hazard at pc={pc} ({name}): r{slot} written earlier and read in between; "
+            f"the second write loses ordering against the intervening reader",
+            RaceWarning,
+            stacklevel=3,
+        )
 
 
 def run(
@@ -75,6 +118,7 @@ def run(
     *,
     memory: bytearray,
     registers: Sequence[int] | None = None,
+    detect_races: bool = True,
 ) -> InterpreterState:
     """Execute a MicroGPU bytecode stream and return the final register file.
 
@@ -83,12 +127,23 @@ def run(
     int per slot); if omitted, all 32 slots start at zero. The run
     loop terminates when ``RETURN`` is decoded or the program counter
     falls off the end of the stream.
+
+    ``detect_races`` enables per-register WAR/WAW hazard warnings
+    (Task 76). The warnings are non-fatal; the program still executes
+    to completion so the diagnostics surface without aborting the
+    host. Set ``detect_races=False`` to silence the warnings (the C++
+    provider uses this when running trusted, scheduler-validated
+    programs).
     """
     regs = list(registers) if registers is not None else [0] * REGISTER_COUNT
     if len(regs) != REGISTER_COUNT:
         raise ValueError(
             f"registers must have {REGISTER_COUNT} entries, got {len(regs)}"
         )
+
+    reg_reads: set[int] = set()
+    reg_writes: set[int] = set()
+    reg_writes_after_reads: set[int] = set()
 
     pc = 0
     while pc < len(words):
@@ -97,36 +152,78 @@ def run(
             case OpCode.LOAD_GLOBAL:
                 _check_register(instr.dst, "LOAD_GLOBAL dst")
                 addr = instr.imm * BYTES_PER_WORD
-                end = addr + BYTES_PER_WORD
-                if end > len(memory):
-                    raise IndexError(
-                        f"LOAD_GLOBAL OOB: addr={addr} + {BYTES_PER_WORD} > {len(memory)}"
+                if detect_races:
+                    _check_reg_race(
+                        instr.dst,
+                        pc,
+                        reg_reads=reg_reads,
+                        reg_writes_after_reads=reg_writes_after_reads,
+                        name="LOAD_GLOBAL",
                     )
                 regs[instr.dst] = int.from_bytes(
-                    memory[addr:end], "little", signed=True
+                    memory[addr : addr + BYTES_PER_WORD], "little", signed=True
                 )
+                if detect_races:
+                    reg_writes.add(instr.dst)
             case OpCode.STORE_GLOBAL:
                 _check_register(instr.src, "STORE_GLOBAL src")
                 addr = instr.imm * BYTES_PER_WORD
-                end = addr + BYTES_PER_WORD
-                if end > len(memory):
-                    raise IndexError(
-                        f"STORE_GLOBAL OOB: addr={addr} + {BYTES_PER_WORD} > {len(memory)}"
+                if detect_races:
+                    reg_reads.add(instr.src)
+                    if instr.src in reg_writes:
+                        reg_writes_after_reads.add(instr.src)
+                memory[addr : addr + BYTES_PER_WORD] = (
+                    (regs[instr.src] & 0xFFFFFFFF).to_bytes(
+                        BYTES_PER_WORD, "little", signed=False
                     )
-                memory[addr:end] = (regs[instr.src] & 0xFFFFFFFF).to_bytes(
-                    BYTES_PER_WORD, "little", signed=False
                 )
             case OpCode.ADD:
                 _check_register(instr.dst, "ADD dst")
                 _check_register(instr.src, "ADD src")
+                if detect_races:
+                    _check_reg_race(
+                        instr.dst,
+                        pc,
+                        reg_reads=reg_reads,
+                        reg_writes_after_reads=reg_writes_after_reads,
+                        name="ADD",
+                    )
+                    reg_reads.add(instr.src)
+                    if instr.src in reg_writes:
+                        reg_writes_after_reads.add(instr.src)
                 regs[instr.dst] = (regs[instr.dst] + regs[instr.src]) & 0xFFFFFFFF
+                if detect_races:
+                    reg_writes.add(instr.dst)
             case OpCode.MUL:
                 _check_register(instr.dst, "MUL dst")
                 _check_register(instr.src, "MUL src")
+                if detect_races:
+                    _check_reg_race(
+                        instr.dst,
+                        pc,
+                        reg_reads=reg_reads,
+                        reg_writes_after_reads=reg_writes_after_reads,
+                        name="MUL",
+                    )
+                    reg_reads.add(instr.src)
+                    if instr.src in reg_writes:
+                        reg_writes_after_reads.add(instr.src)
                 regs[instr.dst] = (regs[instr.dst] * regs[instr.src]) & 0xFFFFFFFF
+                if detect_races:
+                    reg_writes.add(instr.dst)
             case OpCode.SIGMOID:
                 _check_register(instr.dst, "SIGMOID dst")
+                if detect_races:
+                    _check_reg_race(
+                        instr.dst,
+                        pc,
+                        reg_reads=reg_reads,
+                        reg_writes_after_reads=reg_writes_after_reads,
+                        name="SIGMOID",
+                    )
                 regs[instr.dst] = _sigmoid(regs[instr.dst])
+                if detect_races:
+                    reg_writes.add(instr.dst)
             case OpCode.RETURN:
                 break
             case OpCode.NOP:
@@ -139,6 +236,7 @@ def run(
 __all__ = (
     "BYTES_PER_WORD",
     "InterpreterState",
+    "RaceWarning",
     "REGISTER_COUNT",
     "run",
 )
