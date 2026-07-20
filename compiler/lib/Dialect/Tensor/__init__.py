@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from xdsl.dialects.builtin import BoolAttr
+from xdsl.dialects.builtin import BoolAttr, FloatAttr, Float32Type, IntAttr
 from xdsl.ir import Dialect, EnumAttribute, SSAValue
 from xdsl.irdl import (
     IRDLOperation,
@@ -411,6 +411,137 @@ class GeluOp(IRDLOperation):
 
 
 # ---------------------------------------------------------------------------
+# Layer norm op
+# ---------------------------------------------------------------------------
+
+
+@irdl_op_definition
+class LayerNormOp(IRDLOperation):
+    """
+    `forge.tensor.layer_norm` — applies layer normalisation along the last
+    dim of ``input``. Gamma and beta are 1D tensors of length
+    ``input.shape[-1]``; the optional ``epsilon`` property is the
+    numerical-stability term added inside the standard deviation
+    (default ``1e-5``, matching PyTorch's ``nn.LayerNorm`` default).
+
+        input : !forge.tensor<S>
+        gamma : !forge.tensor<input.shape[-1]>   (1D)
+        beta  : !forge.tensor<input.shape[-1]>   (1D)
+        out   : !forge.tensor<S>
+
+    Verifier:
+        * gamma.rank == 1, beta.rank == 1
+        * gamma.shape[0] == beta.shape[0] == input.shape[-1]
+        * all four operands/result share the same dtype
+        * out.shape == input.shape
+    """
+
+    name = "forge.tensor.layer_norm"
+    # FloatAttr needs an explicit `type` argument (the float width). We
+    # pick fp32 to match the canonical epsilon constant in PyTorch's
+    # nn.LayerNorm; downstream codegen widens if the input dtype demands.
+    epsilon = opt_prop_def(
+        FloatAttr, default_value=FloatAttr(1e-5, Float32Type())
+    )
+    input = operand_def(TensorType)
+    gamma = operand_def(TensorType)
+    beta = operand_def(TensorType)
+    out = result_def(TensorType)
+
+    traits = traits_def(Pure(), NoMemoryEffect())
+
+    irdl_options = (ParsePropInAttrDict(),)
+    assembly_format = (
+        "$input `,` $gamma `,` $beta attr-dict `:` "
+        "`(` type($input) `,` type($gamma) `,` type($beta) `)` `->` type($out)"
+    )
+
+    def __init__(
+        self,
+        input,
+        gamma,
+        beta,
+        epsilon: float = 1e-5,
+        result_type=None,
+    ):
+        operands = [input, gamma, beta]
+        properties = {"epsilon": FloatAttr(float(epsilon), Float32Type())}
+        if result_type is not None:
+            super().__init__(
+                operands=operands,
+                result_types=[result_type],
+                properties=properties,
+            )
+        else:
+            super().__init__(operands=operands, properties=properties)
+
+    def verify_(self) -> None:
+        input_type = _check_tensor(self.input, "forge.tensor.layer_norm operand 'input'")
+        gamma_type = _check_tensor(self.gamma, "forge.tensor.layer_norm operand 'gamma'")
+        beta_type = _check_tensor(self.beta, "forge.tensor.layer_norm operand 'beta'")
+        out_type = _check_tensor(self.out, "forge.tensor.layer_norm result")
+
+        # layer_norm does not promote — mismatched dtypes would silently
+        # corrupt numerics downstream, so reject them here.
+        if gamma_type.dtype != input_type.dtype:
+            raise VerifyException(
+                "forge.tensor.layer_norm gamma dtype must match input dtype: "
+                f"{gamma_type.dtype} vs {input_type.dtype}"
+            )
+        if beta_type.dtype != input_type.dtype:
+            raise VerifyException(
+                "forge.tensor.layer_norm beta dtype must match input dtype: "
+                f"{beta_type.dtype} vs {input_type.dtype}"
+            )
+        if out_type.dtype != input_type.dtype:
+            raise VerifyException(
+                "forge.tensor.layer_norm result dtype must match input dtype: "
+                f"{out_type.dtype} vs {input_type.dtype}"
+            )
+
+        # gamma + beta must be 1D and equal to the last dim of input.
+        gamma_shape = _static_shape(gamma_type)
+        beta_shape = _static_shape(beta_type)
+        if len(gamma_shape) != 1:
+            raise VerifyException(
+                "forge.tensor.layer_norm gamma must be 1D, got "
+                f"shape {gamma_shape}"
+            )
+        if len(beta_shape) != 1:
+            raise VerifyException(
+                "forge.tensor.layer_norm beta must be 1D, got "
+                f"shape {beta_shape}"
+            )
+        input_shape = _static_shape(input_type)
+        if len(input_shape) < 1:
+            raise VerifyException(
+                "forge.tensor.layer_norm input must have rank >= 1, got "
+                f"shape {input_shape}"
+            )
+        last_dim = input_shape[-1]
+        # Only check the size when gamma is statically known (no -1 entry);
+        # symbolic / unknown sizes fall through to downstream passes.
+        if gamma_shape[0] != -1 and gamma_shape[0] != last_dim:
+            raise VerifyException(
+                "forge.tensor.layer_norm gamma shape[0] must equal "
+                f"input.shape[-1]: got {gamma_shape[0]} vs {last_dim} "
+                f"(input.shape={input_shape})"
+            )
+        if beta_shape[0] != -1 and beta_shape[0] != last_dim:
+            raise VerifyException(
+                "forge.tensor.layer_norm beta shape[0] must equal "
+                f"input.shape[-1]: got {beta_shape[0]} vs {last_dim} "
+                f"(input.shape={input_shape})"
+            )
+
+        if _static_shape(out_type) != input_shape:
+            raise VerifyException(
+                "forge.tensor.layer_norm result shape must equal input shape: "
+                f"got {_static_shape(out_type)}, expected {input_shape}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Dialect registration
 # ---------------------------------------------------------------------------
 
@@ -422,6 +553,7 @@ TensorDialect = Dialect(
         FusedEpilogueOp,
         BroadcastAddOp,
         GeluOp,
+        LayerNormOp,
     ],
     [
         ActivationAttr,
