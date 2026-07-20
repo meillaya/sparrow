@@ -4,7 +4,7 @@ MLIR-based heterogeneous ML compiler and C++ runtime for PyTorch. Phase 1 ships 
 
 See `.omo/plans/forgestack.md` for the full Phase 1 plan.
 
-## Shipped (Phases 1-8)
+## Shipped (Phases 1-8 + Phase 7)
 
 ### Phase 1 — end-to-end vertical slice (PyTorch FX → MLIR → C++ CPU)
 
