@@ -542,6 +542,82 @@ class LayerNormOp(IRDLOperation):
 
 
 # ---------------------------------------------------------------------------
+# Softmax op
+# ---------------------------------------------------------------------------
+
+
+@irdl_op_definition
+class SoftmaxOp(IRDLOperation):
+    """
+    `forge.tensor.softmax` — softmax along ``dim``. The op is shape-preserving
+    (output shape == input shape). The ``dim`` property is an ``IntAttr``
+    (default ``-1`` matches PyTorch's ``nn.functional.softmax`` default).
+
+        input : !forge.tensor<S>
+        out   : !forge.tensor<S>
+
+    Note: this dialect-level op only encodes the shape / dtype / dim
+    metadata. The actual numeric implementation lives in the codegen
+    backend (Triton / astra / microgpu) — Task 11's plan explicitly
+    says "must NOT add numerically-correct softmax implementation".
+    """
+
+    name = "forge.tensor.softmax"
+    dim = opt_prop_def(IntAttr, default_value=IntAttr(-1))
+    input = operand_def(TensorType)
+    out = result_def(TensorType)
+
+    traits = traits_def(Pure(), NoMemoryEffect())
+
+    irdl_options = (ParsePropInAttrDict(),)
+    assembly_format = (
+        "$input attr-dict `:` `(` type($input) `)` `->` type($out)"
+    )
+
+    def __init__(self, input, dim: int = -1, result_type=None):
+        properties = {"dim": IntAttr(int(dim))}
+        if result_type is not None:
+            super().__init__(
+                operands=[input],
+                result_types=[result_type],
+                properties=properties,
+            )
+        else:
+            super().__init__(operands=[input], properties=properties)
+
+    def verify_(self) -> None:
+        input_type = _check_tensor(self.input, "forge.tensor.softmax operand 'input'")
+        out_type = _check_tensor(self.out, "forge.tensor.softmax result")
+        if input_type.dtype != out_type.dtype:
+            raise VerifyException(
+                "forge.tensor.softmax result dtype must match input dtype: "
+                f"{out_type.dtype} vs {input_type.dtype}"
+            )
+        if _static_shape(input_type) != _static_shape(out_type):
+            raise VerifyException(
+                "forge.tensor.softmax result shape must equal input shape: "
+                f"got {_static_shape(out_type)}, expected "
+                f"{_static_shape(input_type)}"
+            )
+        # `dim` must be a valid index for the input rank. Tolerate symbolic rank
+        # (all dims == -1) so the verifier doesn't reject dynamic-shape IR —
+        # the partitioner / codegen owns dim validation against the concrete
+        # runtime shape.
+        input_shape = _static_shape(input_type)
+        if all(d == -1 for d in input_shape):
+            return
+        ndim = len(input_shape)
+        dim_v = self.dim.data
+        # PyTorch semantics: negative dim wraps from the end. Require it to land
+        # in `[-(ndim), ndim-1]`.
+        if not (-ndim <= int(dim_v) < ndim):
+            raise VerifyException(
+                "forge.tensor.softmax dim out of range for input rank "
+                f"{ndim}: got dim={int(dim_v)} (input.shape={input_shape})"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Dialect registration
 # ---------------------------------------------------------------------------
 
@@ -554,6 +630,7 @@ TensorDialect = Dialect(
         BroadcastAddOp,
         GeluOp,
         LayerNormOp,
+        SoftmaxOp,
     ],
     [
         ActivationAttr,
