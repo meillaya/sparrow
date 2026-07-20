@@ -24,13 +24,11 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from forge_torch.compile_partitioned import (
     CompiledModel,
     compile_partitioned,
 )
 from forge_torch.partitioner import map_node_to_forge_op
-
 
 # ---------------------------------------------------------------------------
 # Function-style TransformerBlock mirror — duplicated from
@@ -173,7 +171,9 @@ def test_config_b_elementwise_to_triton_matmul_to_astra(
     compile_time_ms = (time.perf_counter() - t0) * 1000.0
 
     # Per-region spec §19 Config B mapping.
-    for idx, (region, backend) in enumerate(zip(compiled.regions, compiled.region_assignments, strict=True)):
+    for idx, (region, backend) in enumerate(
+        zip(compiled.regions, compiled.region_assignments, strict=True)
+    ):
         kind = _region_op_kind(region)
         if kind == "matmul":
             assert backend == "astra", (

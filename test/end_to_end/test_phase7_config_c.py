@@ -28,13 +28,11 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from forge_torch.compile_partitioned import (
     CompiledModel,
     compile_partitioned,
 )
 from forge_torch.partitioner import map_node_to_forge_op
-
 
 # ---------------------------------------------------------------------------
 # Function-style TransformerBlock mirror — duplicated from
@@ -177,7 +175,9 @@ def test_config_c_elementwise_to_triton_mlp_matmul_to_microgpu(
     # Per-region spec §19 Config C mapping. The shipped Config C routes
     # every matmul region to microgpu (the simplest version; region-
     # index refinement to isolate "MLP-only" matmul is a later task).
-    for idx, (region, backend) in enumerate(zip(compiled.regions, compiled.region_assignments, strict=True)):
+    for idx, (region, backend) in enumerate(
+        zip(compiled.regions, compiled.region_assignments, strict=True)
+    ):
         kind = _region_op_kind(region)
         if kind == "matmul":
             assert backend == "microgpu", (

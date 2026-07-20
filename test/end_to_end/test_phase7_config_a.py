@@ -26,9 +26,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from forge_torch.compile_partitioned import compile_partitioned
-
 
 # ---------------------------------------------------------------------------
 # Function-style TransformerBlock mirror.
@@ -138,8 +136,7 @@ def test_config_a_matches_eager_within_fp32_atol(
 
     # Spec §19 Config A: every region routes to triton.
     assert set(compiled.region_assignments) == {"triton"}, (
-        f"Config A must route every region to triton; got "
-        f"{compiled.region_assignments!r}"
+        f"Config A must route every region to triton; got {compiled.region_assignments!r}"
     )
 
     t0 = time.perf_counter()
