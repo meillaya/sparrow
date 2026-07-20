@@ -21,14 +21,18 @@ stub the shipped test suite exercises.
 from __future__ import annotations
 
 import hashlib
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 import torch
 
 from forge_torch.cache import make_cache_key
 from forge_torch.cache_store import CacheStore
+from forge_torch.capabilities import BACKEND_CAPABILITIES
 from forge_torch.fx_importer import FxImporter
+from forge_torch.op_mapping import normalize_target
 from forge_torch.report import CompilationReport
 
 BACKEND = "forgestack"
@@ -36,6 +40,75 @@ BACKEND = "forgestack"
 # Fixed path shared by Tasks 13/14/15 so the smoke test always reads the
 # last write (per Task 14 brief).
 REPORT_PATH = Path(".omo/evidence/phase1-report.txt")
+
+# ---------------------------------------------------------------------------
+# Phase 7 capability check helpers (Task 5, spec §6).
+#
+# ``compile(target=...)`` looks up ``BACKEND_CAPABILITIES[target]`` and
+# emits a ``UserWarning`` for every op in the captured FX graph that the
+# target cannot run. The ``_ATEN_TO_FORGE_TENSOR`` table is the canonical
+# (FX target) -> (``forge.tensor.<op>`` spelling) translation: the FX
+# importer's dialect uses ``forge.graph.<op>`` (the Phase 1 surface), the
+# capability schema uses ``forge.tensor.<op>`` (the Phase 7 surface), and
+# the partitioner (Task 18) consumes the capability spelling directly.
+# FX ops without a canonical Phase 7 op (e.g. ``aten.relu`` which is
+# still in ``UNSUPPORTED_BUT_RECOGNISED``) are silently skipped — the
+# capability check is a Phase 7 concern and only covers the ops the
+# partitioner routes on.
+# ---------------------------------------------------------------------------
+
+_ATEN_TO_FORGE_TENSOR: Final[dict[str, str]] = {
+    "aten.mm": "forge.tensor.gemm",
+    "aten.matmul": "forge.tensor.gemm",
+    "aten.add": "forge.tensor.broadcast_add",
+    "aten.gelu": "forge.tensor.gelu",
+    "aten.view": "forge.tensor.reshape",
+    "aten._unsafe_view": "forge.tensor.reshape",
+    "aten.softmax": "forge.tensor.softmax",
+    "aten.layer_norm": "forge.tensor.layer_norm",
+    "aten.scaled_dot_product_attention": "forge.tensor.scaled_dot_product_attention",
+}
+
+
+def _fx_ops_to_forge_tensor_ops(gm: torch.fx.GraphModule) -> set[str]:
+    """Return the ``forge.tensor.*`` ops present in ``gm``.
+
+    Walks the FX graph in node order and translates each ``call_function``
+    target to its canonical ``forge.tensor.<op>`` spelling via
+    :data:`_ATEN_TO_FORGE_TENSOR`. Non-call_function nodes (placeholders,
+    outputs, get_attr) are skipped — they are not data-flow ops.
+    """
+    out: set[str] = set()
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        normalized = normalize_target(node.target)
+        canonical = _ATEN_TO_FORGE_TENSOR.get(normalized)
+        if canonical is not None:
+            out.add(canonical)
+    return out
+
+
+def _check_target_capabilities(target: str, fx_ops: set[str]) -> None:
+    """Emit a :class:`UserWarning` per op that ``target`` cannot run.
+
+    Unknown ``target`` names raise :class:`KeyError` so callers can detect
+    typos at the API boundary instead of silently falling back. The
+    spec §6 capability schema is the source of truth; the registry is
+    consulted by name and the negative diff is reported as a warning
+    (per Task 5 spec — don't fail).
+    """
+    capabilities = BACKEND_CAPABILITIES[target]
+    unsupported = sorted(fx_ops - capabilities.supported_ops)
+    for op in unsupported:
+        warnings.warn(
+            (
+                f"target {target!r} does not support op {op!r}; "
+                f"supported ops are {sorted(capabilities.supported_ops)}"
+            ),
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +121,7 @@ def compile(
     example_inputs: list[torch.Tensor],
     *,
     cache_store: CacheStore | None = None,
+    target: str = "triton",
 ) -> CompiledFusedMLP:
     """Compile a PyTorch model using ``torch.compile(backend="forgestack")`` semantics.
 
@@ -59,8 +133,17 @@ def compile(
 
     The lowered-execution path lands once ForgeRT (Tasks 10-12) and the
     Phase-2 partitioner are in place.
+
+    ``target`` selects the backend for the Phase 7 capability check
+    (Task 5). One :class:`UserWarning` is emitted per op in the captured
+    FX graph that ``target``'s :class:`BackendCapabilities` does not
+    cover; compilation proceeds regardless (the warning is the
+    partitioner's "reroute me" signal, not a hard failure). Existing
+    Phase 1-8 callers that omit ``target=`` get the previous behaviour
+    (``"triton"``).
     """
     gm = torch.fx.symbolic_trace(model)
+    _check_target_capabilities(target, _fx_ops_to_forge_tensor_ops(gm))
     importer = FxImporter(example_inputs)
     mlir_text = importer.import_graph(gm)
 
@@ -68,7 +151,7 @@ def compile(
     graph_hash = hashlib.sha256(mlir_text.encode()).hexdigest()
     key = make_cache_key(
         graph_hash=graph_hash,
-        target="triton",
+        target=target,
         arch="x86_64_v3",
         dtype=_infer_dtype_token(example_inputs),
         shape_constraints="static",
@@ -80,7 +163,7 @@ def compile(
     if not cache_hit:
         artifact = _build_artifact(mlir_text, model)
         cache_store.put(key, artifact)
-        report = _build_report(model, gm, mlir_text)
+        report = _build_report(model, gm, mlir_text, target=target)
         _emit_report(report)
 
     return CompiledFusedMLP(
@@ -245,6 +328,8 @@ def _build_report(
     model: torch.nn.Module,
     gm: torch.fx.GraphModule,
     mlir_text: str,
+    *,
+    target: str = "triton",
 ) -> CompilationReport:
     """Populate a :class:`CompilationReport` with Phase-1 FusedMLP numbers."""
     model_name = model.__class__.__name__
@@ -255,7 +340,7 @@ def _build_report(
         imported_mlir_operations=imported,
         operations_after_canonicalize=imported,  # canonicalize is a no-op in Phase 1
         fusion_groups=1,
-        selected_target="triton",
+        selected_target=target,
         alternative_astra_cost="1.31x",
         alternative_fpga_cost="2.04x including transfer",
         schedule={
