@@ -93,3 +93,16 @@ target_link_libraries(test_astra_provider
         GTest::gtest_main
 )
 gtest_discover_tests(test_astra_provider)
+
+# Wave 17 — MicroGpuDeviceProvider wraps the in-process Python
+# interpreter (single-warp SIMT bytecode). Verifies the launch path
+# that fires a `python3 -c <script>` subprocess against the project's
+# .venv and parses a base64 register-file payload back.
+add_executable(test_microgpu_provider test_microgpu_provider.cpp)
+target_link_libraries(test_microgpu_provider
+    PRIVATE
+        forgestack::runtime
+        GTest::gtest
+        GTest::gtest_main
+)
+gtest_discover_tests(test_microgpu_provider)
