@@ -12,10 +12,12 @@ Text format:
 
 The assembler/disassembler pair is symmetric: a round-trip
 ``assemble(text) -> disassemble(words) -> assemble(...)`` preserves
-the word stream modulo whitespace and comments. The dialect bridge in
-:func:`assemble_from_microgpu_dialect` /
-:func:`disassemble_to_microgpu_dialect` is added in Task 72; this
-module's first commit only ships the text path.
+the word stream modulo whitespace and comments. The dialect bridge
+(:func:`assemble_from_microgpu_dialect` /
+:func:`disassemble_to_microgpu_dialect`) lets the rest of the
+compiler drive the assembler from the typed
+:mod:`compiler.lib.Dialect.MicroGPU` ops via the lightweight
+:class:`MicrogpuOp` record (one field per wire-format slot).
 
 Reference: spec §11. Mirrors
 :mod:`compiler.lib.Dialect.Astra.assembler` in shape.
@@ -25,7 +27,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Final
+from dataclasses import dataclass
+from typing import Final, Literal
 
 from backends.microgpu.isa import OpCode, decode, encode
 
@@ -36,6 +39,39 @@ _REGISTER_RE: Final[re.Pattern[str]] = re.compile(r"^r(?P<num>[0-9]+)$")
 
 # Memory operand "[0xADDR]" or "[DEC]" parsed from the textual assembly.
 _MEMORY_RE: Final[re.Pattern[str]] = re.compile(r"^\[(?P<addr>0[xX][0-9a-fA-F]+|[0-9]+)\]$")
+
+
+MicrogpuOpName = Literal[
+    "load_global", "store_global", "add", "mul", "sigmoid", "return"
+]
+
+
+@dataclass(frozen=True, slots=True)
+class MicrogpuOp:
+    """One MicroGPU dialect operation in the assembler's detached-record form.
+
+    Each field corresponds to one wire-format slot (see
+    :mod:`backends.microgpu.isa`):
+
+    * ``name`` is the dialect op kind (``microgpu.<name>`` in xDSL).
+    * ``dst`` is the 4-bit destination register slot (0..15).
+    * ``src`` is the 4-bit source register slot (0..15); unused for
+      load_global / return.
+    * ``imm`` is the 4-bit immediate / address (0..15); unused for
+      add / mul / sigmoid / return.
+
+    Records are detached: they carry no SSA values or module context,
+    so the assembler can build them from a textual program or from a
+    xDSL op without coupling to either source. The bridge functions
+    :func:`assemble_from_microgpu_dialect` and
+    :func:`disassemble_to_microgpu_dialect` are the canonical
+    serialisation for these records.
+    """
+
+    name: MicrogpuOpName
+    dst: int = 0
+    src: int = 0
+    imm: int = 0
 
 
 def _line_error(line_number: int, message: str) -> ValueError:
@@ -197,4 +233,66 @@ def disassemble(words: Sequence[int]) -> str:
     return "\n".join(lines)
 
 
-__all__ = ("assemble", "disassemble")
+def _encode_microgpu_op(op: MicrogpuOp) -> int:
+    """Translate one :class:`MicrogpuOp` record into a 16-bit instruction word.
+
+    Validates that each populated field fits the 4-bit wire range and
+    that the op kind is one of the seven dialect-supported names.
+    """
+    match op.name:
+        case "load_global":
+            return encode(OpCode.LOAD_GLOBAL, op.dst, 0, imm=op.imm)
+        case "store_global":
+            return encode(OpCode.STORE_GLOBAL, 0, op.src, imm=op.imm)
+        case "add":
+            return encode(OpCode.ADD, op.dst, op.src, imm=0)
+        case "mul":
+            return encode(OpCode.MUL, op.dst, op.src, imm=0)
+        case "sigmoid":
+            return encode(OpCode.SIGMOID, op.dst, 0, imm=0)
+        case "return":
+            return encode(OpCode.RETURN, 0, 0, imm=0)
+        case unreachable:
+            raise ValueError(f"unknown microgpu dialect op: {op.name!r}")
+
+
+def assemble_from_microgpu_dialect(microgpu_ops: Sequence[MicrogpuOp]) -> list[int]:
+    """Encode the supported MicroGPU dialect operations in list order."""
+    return [_encode_microgpu_op(op) for op in microgpu_ops]
+
+
+def _decode_microgpu_op(word: int) -> MicrogpuOp:
+    """Translate one 16-bit instruction word into a :class:`MicrogpuOp` record."""
+    instr = decode(word)
+    match instr.opcode:
+        case OpCode.LOAD_GLOBAL:
+            return MicrogpuOp(name="load_global", dst=instr.dst, imm=instr.imm)
+        case OpCode.STORE_GLOBAL:
+            return MicrogpuOp(name="store_global", src=instr.src, imm=instr.imm)
+        case OpCode.ADD:
+            return MicrogpuOp(name="add", dst=instr.dst, src=instr.src)
+        case OpCode.MUL:
+            return MicrogpuOp(name="mul", dst=instr.dst, src=instr.src)
+        case OpCode.SIGMOID:
+            return MicrogpuOp(name="sigmoid", dst=instr.dst)
+        case OpCode.RETURN:
+            return MicrogpuOp(name="return")
+        case OpCode.NOP:
+            raise ValueError("NOP has no MicroGPU dialect op")
+        case unreachable:
+            raise ValueError(f"unhandled wire opcode {instr.opcode!r}")
+
+
+def disassemble_to_microgpu_dialect(words: Sequence[int]) -> list[MicrogpuOp]:
+    """Decode instruction words into detached :class:`MicrogpuOp` records."""
+    return [_decode_microgpu_op(word) for word in words]
+
+
+__all__ = (
+    "MicrogpuOp",
+    "MicrogpuOpName",
+    "assemble",
+    "assemble_from_microgpu_dialect",
+    "disassemble",
+    "disassemble_to_microgpu_dialect",
+)

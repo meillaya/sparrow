@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from backends.microgpu.asm import assemble, disassemble
+from backends.microgpu.asm import (
+    MicrogpuOp,
+    assemble,
+    assemble_from_microgpu_dialect,
+    disassemble,
+    disassemble_to_microgpu_dialect,
+)
 from backends.microgpu.isa import OpCode, decode, encode
 
 
@@ -133,3 +139,117 @@ def test_all_seven_opcodes_have_text_round_trip() -> None:
         assert decoded.dst == dst
         assert decoded.src == src
         assert decoded.imm == imm
+
+
+# ---------------------------------------------------------------------------
+# Dialect round-trip (Task 72)
+# ---------------------------------------------------------------------------
+
+
+DIALECT_CASES: list[tuple[MicrogpuOp, int, OpCode, int, int, int]] = [
+    # (op, expected word, expected opcode, expected dst, expected src, expected imm)
+    (
+        MicrogpuOp(name="load_global", dst=2, imm=5),
+        encode(OpCode.LOAD_GLOBAL, 2, 0, imm=5),
+        OpCode.LOAD_GLOBAL,
+        2,
+        0,
+        5,
+    ),
+    (
+        MicrogpuOp(name="store_global", src=3, imm=6),
+        encode(OpCode.STORE_GLOBAL, 0, 3, imm=6),
+        OpCode.STORE_GLOBAL,
+        0,
+        3,
+        6,
+    ),
+    (
+        MicrogpuOp(name="add", dst=1, src=2),
+        encode(OpCode.ADD, 1, 2, imm=0),
+        OpCode.ADD,
+        1,
+        2,
+        0,
+    ),
+    (
+        MicrogpuOp(name="mul", dst=1, src=2),
+        encode(OpCode.MUL, 1, 2, imm=0),
+        OpCode.MUL,
+        1,
+        2,
+        0,
+    ),
+    (
+        MicrogpuOp(name="sigmoid", dst=4),
+        encode(OpCode.SIGMOID, 4, 0, imm=0),
+        OpCode.SIGMOID,
+        4,
+        0,
+        0,
+    ),
+    (
+        MicrogpuOp(name="return"),
+        encode(OpCode.RETURN, 0, 0, imm=0),
+        OpCode.RETURN,
+        0,
+        0,
+        0,
+    ),
+]
+
+
+@pytest.mark.parametrize(("op", "expected_word", "_opc", "_dst", "_src", "_imm"), DIALECT_CASES)
+def test_assemble_from_microgpu_dialect_emits_expected_word(
+    op: MicrogpuOp, expected_word: int, _opc: OpCode, _dst: int, _src: int, _imm: int
+) -> None:
+    """Given one dialect op record, the assembler emits the matching 16-bit word."""
+    assert assemble_from_microgpu_dialect([op]) == [expected_word]
+
+
+@pytest.mark.parametrize(("op", "_word", "expected_opc", "expected_dst", "expected_src", "expected_imm"), DIALECT_CASES)
+def test_disassemble_to_microgpu_dialect_emits_expected_record(
+    op: MicrogpuOp,
+    _word: int,
+    expected_opc: OpCode,
+    expected_dst: int,
+    expected_src: int,
+    expected_imm: int,
+) -> None:
+    """Given a 16-bit word, the disassembler emits a record with the right field shape."""
+    record = disassemble_to_microgpu_dialect([_word])[0]
+    assert record.name == op.name
+    assert record.dst == expected_dst
+    assert record.src == expected_src
+    assert record.imm == expected_imm
+    assert decode(_word).opcode is expected_opc
+
+
+def test_dialect_round_trip_covers_all_six_dialect_ops() -> None:
+    """All six dialect ops survive a full dialect -> bytes -> dialect round-trip."""
+    ops: list[MicrogpuOp] = [case[0] for case in DIALECT_CASES]
+    words = assemble_from_microgpu_dialect(ops)
+    rebuilt = disassemble_to_microgpu_dialect(words)
+    assert rebuilt == ops
+    assert assemble_from_microgpu_dialect(rebuilt) == words
+
+
+def test_dialect_assemble_rejects_unknown_op_name() -> None:
+    """Given an op name outside the dialect, the bridge raises."""
+    op = MicrogpuOp(name="bogus")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="unknown microgpu dialect op"):
+        _ = assemble_from_microgpu_dialect([op])
+
+
+def test_dialect_disassemble_rejects_nop_word() -> None:
+    """Given a NOP word, the dialect bridge raises (no dialect op exists)."""
+    nop_word = encode(OpCode.NOP, 0, 0, imm=0)
+    with pytest.raises(ValueError, match="NOP has no MicroGPU dialect op"):
+        _ = disassemble_to_microgpu_dialect([nop_word])
+
+
+def test_dialect_round_trip_matches_text_assembler() -> None:
+    """The dialect bridge and text assembler emit the same byte stream."""
+    ops: list[MicrogpuOp] = [case[0] for case in DIALECT_CASES]
+    text = disassemble(assemble_from_microgpu_dialect(ops))
+    assert assemble(text) == assemble_from_microgpu_dialect(ops)
