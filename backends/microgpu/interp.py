@@ -40,7 +40,6 @@ from typing import Final
 
 from backends.microgpu.isa import OpCode, decode
 
-
 # 32-register file (r0..r31). The wire format only encodes the low 16
 # slots (4-bit register field), so an instruction can only read/write
 # r0..r15; the higher 16 slots are reachable via the host's pre-loaded
@@ -63,9 +62,7 @@ class MemoryOutOfBoundsError(IndexError):
         self.opcode = opcode
         self.address = address
         self.memory_size = memory_size
-        super().__init__(
-            f"{opcode} OOB: addr={address} + {BYTES_PER_WORD} > {memory_size}"
-        )
+        super().__init__(f"{opcode} OOB: addr={address} + {BYTES_PER_WORD} > {memory_size}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,9 +195,7 @@ def run(
     """
     regs = list(registers) if registers is not None else [0] * REGISTER_COUNT
     if len(regs) != REGISTER_COUNT:
-        raise ValueError(
-            f"registers must have {REGISTER_COUNT} entries, got {len(regs)}"
-        )
+        raise ValueError(f"registers must have {REGISTER_COUNT} entries, got {len(regs)}")
 
     reg_reads: set[int] = set()
     reg_writes: set[int] = set()
@@ -235,10 +230,8 @@ def run(
                     reg_reads.add(instr.src)
                     if instr.src in reg_writes:
                         reg_writes_after_reads.add(instr.src)
-                memory[addr : addr + BYTES_PER_WORD] = (
-                    (regs[instr.src] & 0xFFFFFFFF).to_bytes(
-                        BYTES_PER_WORD, "little", signed=False
-                    )
+                memory[addr : addr + BYTES_PER_WORD] = (regs[instr.src] & 0xFFFFFFFF).to_bytes(
+                    BYTES_PER_WORD, "little", signed=False
                 )
             case OpCode.ADD:
                 _check_register(instr.dst, "ADD dst")
@@ -389,12 +382,12 @@ def bytecode_to_dag(words: Sequence[int]) -> DepDAG:
 
 __all__ = (
     "BYTES_PER_WORD",
+    "REGISTER_COUNT",
     "DepDAG",
     "DepNode",
     "InterpreterState",
     "MemoryOutOfBoundsError",
     "RaceWarning",
-    "REGISTER_COUNT",
     "bytecode_to_dag",
     "run",
 )

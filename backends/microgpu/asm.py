@@ -32,7 +32,6 @@ from typing import Final, Literal
 
 from backends.microgpu.isa import OpCode, decode, encode
 
-
 # Register literals ("r0".."r15") parsed from the textual assembly.
 # Out-of-range register numbers are rejected by ``_parse_register``.
 _REGISTER_RE: Final[re.Pattern[str]] = re.compile(r"^r(?P<num>[0-9]+)$")
@@ -41,9 +40,7 @@ _REGISTER_RE: Final[re.Pattern[str]] = re.compile(r"^r(?P<num>[0-9]+)$")
 _MEMORY_RE: Final[re.Pattern[str]] = re.compile(r"^\[(?P<addr>0[xX][0-9a-fA-F]+|[0-9]+)\]$")
 
 
-MicrogpuOpName = Literal[
-    "load_global", "store_global", "add", "mul", "sigmoid", "return"
-]
+MicrogpuOpName = Literal["load_global", "store_global", "add", "mul", "sigmoid", "return"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +249,7 @@ def _encode_microgpu_op(op: MicrogpuOp) -> int:
             return encode(OpCode.SIGMOID, op.dst, 0, imm=0)
         case "return":
             return encode(OpCode.RETURN, 0, 0, imm=0)
-        case unreachable:
+        case _:
             raise ValueError(f"unknown microgpu dialect op: {op.name!r}")
 
 
@@ -279,7 +276,7 @@ def _decode_microgpu_op(word: int) -> MicrogpuOp:
             return MicrogpuOp(name="return")
         case OpCode.NOP:
             raise ValueError("NOP has no MicroGPU dialect op")
-        case unreachable:
+        case _:
             raise ValueError(f"unhandled wire opcode {instr.opcode!r}")
 
 

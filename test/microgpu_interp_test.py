@@ -97,15 +97,12 @@ def test_run_honors_return_op() -> None:
     state = run(assemble(program), memory=memory)
 
     assert state.registers[0] == 42
-    assert memory[BYTES_PER_WORD:2 * BYTES_PER_WORD] == b"\x00\x00\x00\x00"
+    assert memory[BYTES_PER_WORD : 2 * BYTES_PER_WORD] == b"\x00\x00\x00\x00"
 
 
 def test_run_honors_initial_register_state() -> None:
     """Initial register values participate in the run."""
-    program = (
-        "ADD  r0, r1\n"
-        "RETURN\n"
-    )
+    program = "ADD  r0, r1\nRETURN\n"
     memory = bytearray(BYTES_PER_WORD)
     state = run(assemble(program), memory=memory, registers=[7, 5] + [0] * 30)
 
@@ -120,12 +117,7 @@ def test_run_rejects_wrong_register_count() -> None:
 
 def test_store_global_writes_back_to_memory() -> None:
     """STORE_GLOBAL writes the register value to the addressed memory slot."""
-    program = (
-        "LOAD_GLOBAL  r0, [0x0]\n"
-        "ADD  r0, r0\n"
-        "STORE_GLOBAL r0, [0x2]\n"
-        "RETURN\n"
-    )
+    program = "LOAD_GLOBAL  r0, [0x0]\nADD  r0, r0\nSTORE_GLOBAL r0, [0x2]\nRETURN\n"
     memory = _init_memory([21, 0, 0, 0])
     run(assemble(program), memory=memory)
 
@@ -151,6 +143,7 @@ def test_add_and_mul_carry_to_32_bits() -> None:
 
     assert state.registers[0] == 0
 
+
 # ---------------------------------------------------------------------------
 # Bytecode dep DAG (Task 78)
 # ---------------------------------------------------------------------------
@@ -167,12 +160,7 @@ def test_dag_is_empty_for_empty_program() -> None:
 
 def test_dag_node_per_instruction_in_program_order() -> None:
     """The DAG emits one node per instruction in program order."""
-    program = (
-        "LOAD_GLOBAL  r0, [0x0]\n"
-        "ADD  r0, r1\n"
-        "STORE_GLOBAL r0, [0x2]\n"
-        "RETURN\n"
-    )
+    program = "LOAD_GLOBAL  r0, [0x0]\nADD  r0, r1\nSTORE_GLOBAL r0, [0x2]\nRETURN\n"
     dag = bytecode_to_dag(assemble(program))
 
     assert [node.index for node in dag.nodes] == [0, 1, 2, 3]
@@ -182,11 +170,7 @@ def test_dag_node_per_instruction_in_program_order() -> None:
 
 def test_dag_records_reg_and_mem_deps() -> None:
     """Each node carries the register and memory slots it touches."""
-    program = (
-        "LOAD_GLOBAL  r0, [0x0]\n"
-        "ADD  r1, r0\n"
-        "STORE_GLOBAL r1, [0x1]\n"
-    )
+    program = "LOAD_GLOBAL  r0, [0x0]\nADD  r1, r0\nSTORE_GLOBAL r1, [0x1]\n"
     nodes = bytecode_to_dag(assemble(program)).nodes
 
     assert nodes[0].reg_writes == (0,)
@@ -216,10 +200,7 @@ def test_dag_edges_follow_dataflow() -> None:
 
 def test_dag_edges_carry_memory_dependencies() -> None:
     """A STORE after a LOAD of the same memory slot creates an edge."""
-    program = (
-        "LOAD_GLOBAL  r0, [0x0]\n"
-        "STORE_GLOBAL r0, [0x0]\n"
-    )
+    program = "LOAD_GLOBAL  r0, [0x0]\nSTORE_GLOBAL r0, [0x0]\n"
     edges = bytecode_to_dag(assemble(program)).edges
 
     assert (0, 1) in edges
@@ -227,11 +208,7 @@ def test_dag_edges_carry_memory_dependencies() -> None:
 
 def test_dag_handles_nop_and_return() -> None:
     """NOP / RETURN carry no dependencies and no outgoing edges."""
-    program = (
-        "LOAD_GLOBAL  r0, [0x0]\n"
-        "NOP\n"
-        "RETURN\n"
-    )
+    program = "LOAD_GLOBAL  r0, [0x0]\nNOP\nRETURN\n"
     dag = bytecode_to_dag(assemble(program))
 
     assert dag.nodes[1].name == "NOP"

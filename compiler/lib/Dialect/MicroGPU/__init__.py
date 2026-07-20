@@ -38,7 +38,6 @@ from xdsl.irdl import (
 )
 from xdsl.utils.exceptions import VerifyException
 
-
 # i32 is the canonical register + address width for microgpu.
 I32: IntegerType = IntegerType(32)
 
@@ -96,9 +95,7 @@ class StoreGlobalOp(IRDLOperation):
     src = operand_def(IntegerType)
     addr = operand_def(IntegerType)
 
-    assembly_format = (
-        "$src `,` $addr attr-dict `:` `(` type($src) `,` type($addr) `)`"
-    )
+    assembly_format = "$src `,` $addr attr-dict `:` `(` type($src) `,` type($addr) `)`"
 
     def __init__(self, src: object, addr: object) -> None:
         super().__init__(operands=[src, addr])
@@ -228,8 +225,8 @@ MicroGPU = Dialect(
 
 
 __all__ = (
-    "AddOp",
     "I32",
+    "AddOp",
     "LoadGlobalOp",
     "MicroGPU",
     "MulOp",

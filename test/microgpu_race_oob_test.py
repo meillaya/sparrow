@@ -32,11 +32,7 @@ def test_war_hazard_emits_race_warning() -> None:
     The interpreter must emit a ``RaceWarning`` for the second
     instruction but still execute the program.
     """
-    program = (
-        "ADD  r1, r0\n"
-        "ADD  r0, r1\n"
-        "RETURN\n"
-    )
+    program = "ADD  r1, r0\nADD  r0, r1\nRETURN\n"
     memory = bytearray(BYTES_PER_WORD)
 
     with warnings.catch_warnings(record=True) as caught:
@@ -63,12 +59,7 @@ def test_waw_hazard_emits_race_warning_with_intervening_read() -> None:
     not a WAR. The third ADD's write to r0 has both a prior read AND
     a prior write of r0 — the WAW pattern fires.
     """
-    program = (
-        "LOAD_GLOBAL  r0, [0x0]\n"
-        "ADD  r1, r0\n"
-        "ADD  r0, r1\n"
-        "RETURN\n"
-    )
+    program = "LOAD_GLOBAL  r0, [0x0]\nADD  r1, r0\nADD  r0, r1\nRETURN\n"
     memory = bytearray(BYTES_PER_WORD * 2)
     memory[:BYTES_PER_WORD] = (5 & 0xFFFFFFFF).to_bytes(BYTES_PER_WORD, "little", signed=False)
 
@@ -76,10 +67,7 @@ def test_waw_hazard_emits_race_warning_with_intervening_read() -> None:
         warnings.simplefilter("always")
         run(assemble(program), memory=memory)
 
-    waw = [
-        w for w in caught
-        if issubclass(w.category, RaceWarning) and "WAW" in str(w.message)
-    ]
+    waw = [w for w in caught if issubclass(w.category, RaceWarning) and "WAW" in str(w.message)]
     assert waw, "expected a RaceWarning for the WAW hazard"
 
 
@@ -90,12 +78,7 @@ def test_plain_flow_dependency_does_not_emit_warning() -> None:
     the standard flow dependency — no intervening reader is at risk.
     The interpreter must NOT emit a ``RaceWarning`` for that pattern.
     """
-    program = (
-        "LOAD_GLOBAL  r0, [0x0]\n"
-        "ADD  r0, r0\n"
-        "STORE_GLOBAL r0, [0x1]\n"
-        "RETURN\n"
-    )
+    program = "LOAD_GLOBAL  r0, [0x0]\nADD  r0, r0\nSTORE_GLOBAL r0, [0x1]\nRETURN\n"
     memory = bytearray(BYTES_PER_WORD * 2)
     memory[:BYTES_PER_WORD] = (7 & 0xFFFFFFFF).to_bytes(BYTES_PER_WORD, "little", signed=False)
 
@@ -109,11 +92,7 @@ def test_plain_flow_dependency_does_not_emit_warning() -> None:
 
 def test_detect_races_false_silences_warnings() -> None:
     """``detect_races=False`` disables the warning emitter."""
-    program = (
-        "ADD  r1, r0\n"
-        "ADD  r0, r1\n"
-        "RETURN\n"
-    )
+    program = "ADD  r1, r0\nADD  r0, r1\nRETURN\n"
     memory = bytearray(BYTES_PER_WORD)
 
     with warnings.catch_warnings(record=True) as caught:
@@ -121,6 +100,7 @@ def test_detect_races_false_silences_warnings() -> None:
         run(assemble(program), memory=memory, registers=[3, 0] + [0] * 30, detect_races=False)
 
     assert not [w for w in caught if issubclass(w.category, RaceWarning)]
+
 
 # ---------------------------------------------------------------------------
 # Out-of-bounds detection (Task 77)
@@ -142,11 +122,7 @@ def test_load_global_raises_on_oob_address() -> None:
 
 def test_store_global_raises_on_oob_address() -> None:
     """A STORE at an address that overruns the buffer raises OOB."""
-    program = (
-        "LOAD_GLOBAL  r0, [0x0]\n"
-        "STORE_GLOBAL r0, [0xF]\n"
-        "RETURN\n"
-    )
+    program = "LOAD_GLOBAL  r0, [0x0]\nSTORE_GLOBAL r0, [0xF]\nRETURN\n"
     memory = bytearray(BYTES_PER_WORD * 4)
 
     with pytest.raises(MemoryOutOfBoundsError) as exc:
@@ -180,11 +156,7 @@ def test_load_at_last_word_succeeds() -> None:
 
 def test_store_at_last_word_succeeds() -> None:
     """A STORE at the highest valid word address writes the buffered value."""
-    program = (
-        "LOAD_GLOBAL  r0, [0x0]\n"
-        "STORE_GLOBAL r0, [0x3]\n"
-        "RETURN\n"
-    )
+    program = "LOAD_GLOBAL  r0, [0x0]\nSTORE_GLOBAL r0, [0x3]\nRETURN\n"
     memory = bytearray(BYTES_PER_WORD * 4)
     memory[:BYTES_PER_WORD] = (1234 & 0xFFFFFFFF).to_bytes(BYTES_PER_WORD, "little", signed=False)
 

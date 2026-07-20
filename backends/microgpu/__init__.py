@@ -20,4 +20,4 @@ from __future__ import annotations
 
 from backends.microgpu.isa import MicroOp, OpCode, decode, encode
 
-__all__ = ("MicroOp", "OpCode", "encode", "decode")
+__all__ = ("MicroOp", "OpCode", "decode", "encode")

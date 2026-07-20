@@ -13,7 +13,6 @@ from backends.microgpu.asm import (
 )
 from backends.microgpu.isa import OpCode, decode, encode
 
-
 TEXT_CASES: list[tuple[str, int]] = [
     # (text, expected 16-bit word)
     ("LOAD_GLOBAL  r0, [0x1]", encode(OpCode.LOAD_GLOBAL, 0, 0, imm=0x1)),
@@ -207,7 +206,9 @@ def test_assemble_from_microgpu_dialect_emits_expected_word(
     assert assemble_from_microgpu_dialect([op]) == [expected_word]
 
 
-@pytest.mark.parametrize(("op", "_word", "expected_opc", "expected_dst", "expected_src", "expected_imm"), DIALECT_CASES)
+@pytest.mark.parametrize(
+    ("op", "_word", "expected_opc", "expected_dst", "expected_src", "expected_imm"), DIALECT_CASES
+)
 def test_disassemble_to_microgpu_dialect_emits_expected_record(
     op: MicrogpuOp,
     _word: int,

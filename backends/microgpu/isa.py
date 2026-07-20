@@ -155,4 +155,4 @@ def decode(word: int) -> MicroOp:
     )
 
 
-__all__ = ("OpCode", "MicroOp", "encode", "decode")
+__all__ = ("MicroOp", "OpCode", "decode", "encode")
