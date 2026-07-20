@@ -4,7 +4,9 @@ Runs the canonical ``gelu(x @ w + b)`` microcode program for a
 hand-picked input and asserts the final register state matches a
 numpy reference within fp32-equivalent tolerance. The interpreter is
 deliberately a thin fetch/decode/execute loop (spec §11); this file
-exercises every shipped opcode at least once.
+exercises every shipped opcode at least once. It also covers the
+dep-DAG emitter (Task 78) so the partitioner input surface is unit-
+tested alongside the run loop.
 """
 
 from __future__ import annotations
@@ -16,7 +18,10 @@ from backends.microgpu.asm import assemble
 from backends.microgpu.interp import (
     BYTES_PER_WORD,
     REGISTER_COUNT,
+    DepDAG,
+    DepNode,
     InterpreterState,
+    bytecode_to_dag,
     run,
 )
 
@@ -145,3 +150,94 @@ def test_add_and_mul_carry_to_32_bits() -> None:
     state = run(assemble(program), memory=memory, registers=[0xFFFFFFFF, 1] + [0] * 30)
 
     assert state.registers[0] == 0
+
+# ---------------------------------------------------------------------------
+# Bytecode dep DAG (Task 78)
+# ---------------------------------------------------------------------------
+
+
+def test_dag_is_empty_for_empty_program() -> None:
+    """An empty program yields an empty DAG (no nodes, no edges)."""
+    dag = bytecode_to_dag([])
+
+    assert dag.nodes == ()
+    assert dag.edges == ()
+    assert isinstance(dag, DepDAG)
+
+
+def test_dag_node_per_instruction_in_program_order() -> None:
+    """The DAG emits one node per instruction in program order."""
+    program = (
+        "LOAD_GLOBAL  r0, [0x0]\n"
+        "ADD  r0, r1\n"
+        "STORE_GLOBAL r0, [0x2]\n"
+        "RETURN\n"
+    )
+    dag = bytecode_to_dag(assemble(program))
+
+    assert [node.index for node in dag.nodes] == [0, 1, 2, 3]
+    assert [node.name for node in dag.nodes] == ["LOAD_GLOBAL", "ADD", "STORE_GLOBAL", "RETURN"]
+    assert all(isinstance(node, DepNode) for node in dag.nodes)
+
+
+def test_dag_records_reg_and_mem_deps() -> None:
+    """Each node carries the register and memory slots it touches."""
+    program = (
+        "LOAD_GLOBAL  r0, [0x0]\n"
+        "ADD  r1, r0\n"
+        "STORE_GLOBAL r1, [0x1]\n"
+    )
+    nodes = bytecode_to_dag(assemble(program)).nodes
+
+    assert nodes[0].reg_writes == (0,)
+    assert nodes[0].mem_reads == (0,)
+    assert nodes[1].reg_reads == (0,)
+    assert nodes[1].reg_writes == (1,)
+    assert nodes[2].reg_reads == (1,)
+    assert nodes[2].mem_writes == (1,)
+
+
+def test_dag_edges_follow_dataflow() -> None:
+    """Edges connect a writer to a downstream reader of the same slot."""
+    program = (
+        "LOAD_GLOBAL  r0, [0x0]\n"
+        "LOAD_GLOBAL  r1, [0x1]\n"
+        "ADD  r2, r0\n"
+        "MUL  r2, r1\n"
+        "STORE_GLOBAL r2, [0x2]\n"
+    )
+    edges = bytecode_to_dag(assemble(program)).edges
+
+    assert (0, 2) in edges
+    assert (1, 3) in edges
+    assert (2, 3) in edges
+    assert (3, 4) in edges
+
+
+def test_dag_edges_carry_memory_dependencies() -> None:
+    """A STORE after a LOAD of the same memory slot creates an edge."""
+    program = (
+        "LOAD_GLOBAL  r0, [0x0]\n"
+        "STORE_GLOBAL r0, [0x0]\n"
+    )
+    edges = bytecode_to_dag(assemble(program)).edges
+
+    assert (0, 1) in edges
+
+
+def test_dag_handles_nop_and_return() -> None:
+    """NOP / RETURN carry no dependencies and no outgoing edges."""
+    program = (
+        "LOAD_GLOBAL  r0, [0x0]\n"
+        "NOP\n"
+        "RETURN\n"
+    )
+    dag = bytecode_to_dag(assemble(program))
+
+    assert dag.nodes[1].name == "NOP"
+    assert dag.nodes[2].name == "RETURN"
+    assert dag.nodes[1].reg_reads == ()
+    assert dag.nodes[1].reg_writes == ()
+    assert dag.nodes[2].reg_writes == ()
+    assert all(edge[0] != 1 and edge[1] != 1 for edge in dag.edges)
+    assert all(edge[0] != 2 and edge[1] != 2 for edge in dag.edges)

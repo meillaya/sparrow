@@ -9,7 +9,7 @@ reference is also what the C++ :class:`forge_rt::MicroGpuProvider`
 ultimately delegates to (via subprocess), so the test surface lives
 here.
 
-This module layers two diagnostics on top of the run loop:
+This module layers three diagnostic features on top of the run loop:
 
 * **Race detection** (Task 76) — tracks per-register reads/writes and
   emits a :class:`RaceWarning` to ``stderr`` for WAR (write-after-read)
@@ -22,6 +22,10 @@ This module layers two diagnostics on top of the run loop:
   and raises :class:`MemoryOutOfBoundsError` on violation. This catches
   the most common shape bug in hand-written microcode (an immediate
   field that runs off the end of the caller's buffer).
+* **Dependency DAG** (Task 78) — :func:`bytecode_to_dag` walks the
+  bytecode once and emits the (instruction, reg-deps, mem-deps) DAG
+  the Phase 7 partitioner consumes. This is a separate helper so the
+  interpreter's hot path stays branchless.
 
 Reference: spec §11.
 """
@@ -30,8 +34,8 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from typing import Final
 
 from backends.microgpu.isa import OpCode, decode
@@ -69,6 +73,38 @@ class InterpreterState:
     """Snapshot of the post-run register file."""
 
     registers: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DepNode:
+    """One node in the bytecode dep DAG (Task 78).
+
+    ``index`` is the bytecode index of the instruction, ``name`` is the
+    textual mnemonic, ``reg_reads`` / ``reg_writes`` are the register
+    slots the instruction touches, and ``mem_reads`` / ``mem_writes``
+    are the memory-address offsets (in words) the instruction touches.
+    Edges between nodes are derived by the caller from these sets.
+    """
+
+    index: int
+    name: str
+    reg_reads: tuple[int, ...] = ()
+    reg_writes: tuple[int, ...] = ()
+    mem_reads: tuple[int, ...] = ()
+    mem_writes: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DepDAG:
+    """Bytecode dep DAG (Task 78).
+
+    A flat list of :class:`DepNode`s with edges encoded as a
+    ``(from_index, to_index)`` list. The Phase 7 partitioner reads the
+    nodes to build the per-tensor readiness windows.
+    """
+
+    nodes: tuple[DepNode, ...]
+    edges: tuple[tuple[int, int], ...] = field(default_factory=tuple)
 
 
 def _sigmoid(value: int) -> int:
@@ -260,11 +296,105 @@ def run(
     return InterpreterState(registers=tuple(regs))
 
 
+def _instruction_deps(word: int, index: int) -> DepNode:
+    """Build the per-instruction dep record (Task 78)."""
+    instr = decode(word)
+    match instr.opcode:
+        case OpCode.LOAD_GLOBAL:
+            return DepNode(
+                index=index,
+                name="LOAD_GLOBAL",
+                reg_writes=(instr.dst,),
+                mem_reads=(instr.imm,),
+            )
+        case OpCode.STORE_GLOBAL:
+            return DepNode(
+                index=index,
+                name="STORE_GLOBAL",
+                reg_reads=(instr.src,),
+                mem_writes=(instr.imm,),
+            )
+        case OpCode.ADD | OpCode.MUL:
+            return DepNode(
+                index=index,
+                name=instr.opcode.name,
+                reg_reads=(instr.src,),
+                reg_writes=(instr.dst,),
+            )
+        case OpCode.SIGMOID:
+            return DepNode(
+                index=index,
+                name="SIGMOID",
+                reg_reads=(instr.dst,),
+                reg_writes=(instr.dst,),
+            )
+        case OpCode.RETURN:
+            return DepNode(index=index, name="RETURN")
+        case OpCode.NOP:
+            return DepNode(index=index, name="NOP")
+
+
+def _edges_from_nodes(nodes: Iterable[DepNode]) -> tuple[tuple[int, int], ...]:
+    """Compute the cross-node dep edges for a list of :class:`DepNode`s.
+
+    Two nodes share an edge if one writes a register/memory slot the
+    other reads, or both write the same slot (WAW dep). Edges are
+    added in source order so the Phase 7 partitioner can iterate
+    deterministically.
+    """
+    materialised = list(nodes)
+    reg_last_write: dict[int, int] = {}
+    mem_last_write: dict[int, int] = {}
+    reg_last_read: dict[int, int] = {}
+    mem_last_read: dict[int, int] = {}
+    edges: list[tuple[int, int]] = []
+
+    for node in materialised:
+        for slot in node.reg_reads:
+            if slot in reg_last_write:
+                edges.append((reg_last_write[slot], node.index))
+            reg_last_read[slot] = node.index
+        for slot in node.reg_writes:
+            if slot in reg_last_write:
+                edges.append((reg_last_write[slot], node.index))
+            if slot in reg_last_read:
+                edges.append((reg_last_read[slot], node.index))
+            reg_last_write[slot] = node.index
+        for slot in node.mem_reads:
+            if slot in mem_last_write:
+                edges.append((mem_last_write[slot], node.index))
+            mem_last_read[slot] = node.index
+        for slot in node.mem_writes:
+            if slot in mem_last_write:
+                edges.append((mem_last_write[slot], node.index))
+            if slot in mem_last_read:
+                edges.append((mem_last_read[slot], node.index))
+            mem_last_write[slot] = node.index
+
+    return tuple(edges)
+
+
+def bytecode_to_dag(words: Sequence[int]) -> DepDAG:
+    """Convert a bytecode stream into a (nodes, edges) dep DAG (Task 78).
+
+    The returned :class:`DepDAG` is the canonical input to the Phase 7
+    partitioner. Nodes are returned in program order; edges are
+    returned in topological-source order. The structure is purely a
+    static analysis — no run-time state is captured.
+    """
+    nodes = tuple(_instruction_deps(word, index) for index, word in enumerate(words))
+    edges = _edges_from_nodes(nodes)
+    return DepDAG(nodes=nodes, edges=edges)
+
+
 __all__ = (
     "BYTES_PER_WORD",
+    "DepDAG",
+    "DepNode",
     "InterpreterState",
     "MemoryOutOfBoundsError",
     "RaceWarning",
     "REGISTER_COUNT",
+    "bytecode_to_dag",
     "run",
 )
