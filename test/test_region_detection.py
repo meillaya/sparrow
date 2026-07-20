@@ -27,11 +27,10 @@ Why these models:
 
 from __future__ import annotations
 
-import pytest
 import torch
-
 from forge_torch.conftest import FusedMLP
 from forge_torch.region import partition_into_regions
+
 from models.transformer_block import TransformerBlock
 
 

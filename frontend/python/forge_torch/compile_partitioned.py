@@ -35,7 +35,6 @@ import torch
 from torch.fx import GraphModule, Node
 
 from forge_torch.backend import compile as backend_compile
-from forge_torch.cost_estimator import estimate_cost
 from forge_torch.region import partition_into_regions
 
 # ---------------------------------------------------------------------------
@@ -115,9 +114,7 @@ def _assign_region_to_backend(region: list[Node], config: ValidConfig) -> str:
     return "triton"
 
 
-def _assignments_from_config(
-    regions: list[list[Node]], config: ValidConfig
-) -> list[str]:
+def _assignments_from_config(regions: list[list[Node]], config: ValidConfig) -> list[str]:
     """Compute the per-region backend assignment for ``config``."""
     return [_assign_region_to_backend(r, config) for r in regions]
 
@@ -235,9 +232,7 @@ def compile_partitioned(
     etc. — see ``test/test_compile_partitioned.py`` for examples.
     """
     if config not in {"A", "B", "C"}:
-        raise ValueError(
-            f"config must be one of 'A', 'B', 'C'; got {config!r}"
-        )
+        raise ValueError(f"config must be one of 'A', 'B', 'C'; got {config!r}")
 
     gm = torch.fx.symbolic_trace(model)
     regions = partition_into_regions(model, example_inputs)

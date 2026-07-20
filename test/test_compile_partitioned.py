@@ -43,9 +43,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from forge_torch.compile_partitioned import compile_partitioned
-
 
 # ---------------------------------------------------------------------------
 # Shared simplified model + helper.
@@ -116,7 +114,9 @@ def simple_inputs() -> list[torch.Tensor]:
 
 
 @pytest.fixture
-def eager_output(simple_model: _SimpleLayeredModel, simple_inputs: list[torch.Tensor]) -> torch.Tensor:
+def eager_output(
+    simple_model: _SimpleLayeredModel, simple_inputs: list[torch.Tensor]
+) -> torch.Tensor:
     simple_model.eval()
     with torch.no_grad():
         return simple_model(*simple_inputs)
@@ -169,8 +169,7 @@ def test_config_b_runs_and_matches_eager(
         "(gemm regions are routed to astra per spec §19)."
     )
     assert "triton" in compiled.backend_set, (
-        "Config B should assign at least one region to triton "
-        "(elementwise ops per spec §19)."
+        "Config B should assign at least one region to triton (elementwise ops per spec §19)."
     )
 
     compiled_output = compiled(*simple_inputs)
@@ -194,12 +193,10 @@ def test_config_c_runs_and_matches_eager(
     compiled = compile_partitioned(simple_model, simple_inputs, config="C")
 
     assert "microgpu" in compiled.backend_set, (
-        "Config C should assign at least one region to microgpu "
-        "(matmul regions per spec §19)."
+        "Config C should assign at least one region to microgpu (matmul regions per spec §19)."
     )
     assert "triton" in compiled.backend_set, (
-        "Config C should assign at least one region to triton "
-        "(elementwise ops per spec §19)."
+        "Config C should assign at least one region to triton (elementwise ops per spec §19)."
     )
 
     compiled_output = compiled(*simple_inputs)

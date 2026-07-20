@@ -24,12 +24,9 @@
 
 from __future__ import annotations
 
-import operator
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from typing import Final
 
-import torch
 from torch.fx import Node
 
 from forge_torch.capabilities import BackendCapabilities
@@ -193,9 +190,7 @@ def partition(
             if op_name is None:
                 continue
             region_op_names.add(op_name)
-            region_dicts.append(
-                {"op": op_name, "shape": _node_cost_shape(node, op_name)}
-            )
+            region_dicts.append({"op": op_name, "shape": _node_cost_shape(node, op_name)})
 
         if not region_op_names:
             # No mappable ops — default to triton (superset target). The

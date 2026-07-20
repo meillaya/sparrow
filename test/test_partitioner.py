@@ -40,25 +40,17 @@ isolation; Phase 7 production callers pass the full
 
 from __future__ import annotations
 
-import operator
-from typing import Any
-
-import pytest
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.fx import GraphModule, Node
-
 from forge_torch.capabilities import (
     ASTRA_CAPABILITIES,
     BACKEND_CAPABILITIES,
-    MICROGPU_CAPABILITIES,
     TRITON_CAPABILITIES,
     BackendCapabilities,
 )
 from forge_torch.cost_estimator import estimate_cost
 from forge_torch.partitioner import partition
-
+from torch.fx import GraphModule, Node
 
 # ---------------------------------------------------------------------------
 # FX-graph scaffolding helpers.
@@ -128,7 +120,9 @@ def _trace_and_collect(model: nn.Module, inputs: list[torch.Tensor]) -> GraphMod
 class _LinearRegionModel(nn.Module):
     """Four-op model that lowers to ``gemm + fused_epilogue + add + gelu``."""
 
-    def forward(self, x: torch.Tensor, w_q: torch.Tensor, w_k: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, w_q: torch.Tensor, w_k: torch.Tensor, bias: torch.Tensor
+    ) -> torch.Tensor:
         a = torch.matmul(x, w_q)  # gemm
         b = torch.matmul(a, w_k) + bias  # fused_epilogue-ish
         c = torch.nn.functional.gelu(b)  # gelu
@@ -165,7 +159,7 @@ def test_linear_region_picks_triton() -> None:
     _set_cost_shape(add_node, [2, 2])
     _set_cost_shape(gelu_node, [2, 2])
 
-    region = matmul_nodes + [add_node, gelu_node]
+    region = [*matmul_nodes, add_node, gelu_node]
 
     # Restrict to {triton, astra} to compare them in isolation.
     caps: dict[str, BackendCapabilities] = {
@@ -220,9 +214,7 @@ def test_matmul_only_region_prefers_astra_for_larger_shapes() -> None:
     chosen_region, chosen_backend = result[0]
     assert chosen_region == [matmul_node]
     # Sanity: verify our cost model prediction matches the comment.
-    cost = estimate_cost(
-        [{"op": "forge.tensor.gemm", "shape": [512, 512, 512]}], "astra"
-    )
+    cost = estimate_cost([{"op": "forge.tensor.gemm", "shape": [512, 512, 512]}], "astra")
     assert cost.compute_cycles == 524_288, (
         f"astra M=N=K=512 cycle count drifted (got {cost.compute_cycles}); "
         "update the test cost comment if the cycle table changed."
