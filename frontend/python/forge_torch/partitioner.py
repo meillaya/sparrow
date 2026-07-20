@@ -1,3 +1,5 @@
+"""Greedy partitioner per spec §6: pick cheapest valid backend per region subject to capabilities (Phase 7 Wave 4)."""
+
 # frontend/python/forge_torch/partitioner.py
 #
 # Greedy heterogeneous partitioner (Task 18, spec §6, plan §Todos).

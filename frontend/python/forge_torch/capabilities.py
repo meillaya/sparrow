@@ -1,3 +1,5 @@
+"""BackendCapabilities registry per spec §6 (Phase 7 Wave 1)."""
+
 # frontend/python/forge_torch/capabilities.py
 #
 # BackendCapabilities registry for the Phase 7 heterogeneous partitioner

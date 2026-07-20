@@ -1,3 +1,5 @@
+"""Region boundary detection: walk FX graph in topological order and group into per-op regions (Phase 7 Wave 4)."""
+
 # frontend/python/forge_torch/region.py
 #
 # Region boundary detection for the Phase 7 heterogeneous partitioner

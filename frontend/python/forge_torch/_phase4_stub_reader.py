@@ -1,3 +1,5 @@
+"""Reader for the Phase 4 CompilationReport.alternative_astra_cost / alternative_fpga_cost stubs (Phase 7 Wave 2)."""
+
 # frontend/python/forge_torch/_phase4_stub_reader.py
 #
 # Phase 4 cost-stub reader (Task 9 of `forgestack-phase7.md`).

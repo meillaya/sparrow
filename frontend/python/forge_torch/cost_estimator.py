@@ -1,3 +1,5 @@
+"""Analytical cost model reading Phase 4 cost stubs + per-op cycle tables (Phase 7 Wave 2)."""
+
 # frontend/python/forge_torch/cost_estimator.py
 #
 # Phase 7 analytical CostModel (spec §6, §20).

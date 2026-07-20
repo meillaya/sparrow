@@ -1,3 +1,5 @@
+"""Per-backend per-op cycle constants (Phase 7 Wave 0)."""
+
 # frontend/python/forge_torch/_phase7_cycle_tables.py
 #
 # Per-op per-backend cycle constants for the Phase 7 partitioner (spec §16,

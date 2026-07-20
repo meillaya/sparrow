@@ -1,3 +1,5 @@
+"""Public entry point that wires compile + partition + dispatch for spec §19 Config A/B/C (Phase 7 Wave 4)."""
+
 # frontend/python/forge_torch/compile_partitioned.py
 #
 # Heterogeneous compile entry point (Task 19, spec §6, plan §Todos).
