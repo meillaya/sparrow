@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Final, assert_never
+from enum import IntEnum
+from typing import Final, assert_never, final
 
 from backends.astra.sim.functional import (
     SRAM_BYTES,
@@ -28,6 +29,15 @@ _CYCLE_TABLE: Final[dict[OpCode, int]] = {
 _FLOAT_BYTES: Final = 4
 
 
+class StallReason(IntEnum):
+    """Engine activity responsible for cycles stalled in the peer engine."""
+
+    NONE = 0
+    DMA = 1
+    COMPUTE = 2
+    BOTH = 3
+
+
 @dataclass(frozen=True, slots=True)
 class SimMetrics:
     """Timing and resource metrics for one simulation."""
@@ -40,6 +50,7 @@ class SimMetrics:
     bytes_transferred: int
 
 
+@final
 class _ResidencyTracker:
     """Mutable byte-occupancy map used to measure peak SRAM residency."""
 
@@ -64,6 +75,18 @@ class _ResidencyTracker:
         self.current_bytes -= released
 
 
+def _stall_reason(opcode: OpCode) -> StallReason:
+    match opcode:
+        case OpCode.DMA_LOAD | OpCode.DMA_STORE:
+            return StallReason.DMA
+        case OpCode.MATMUL | OpCode.VECTOR_GELU:
+            return StallReason.COMPUTE
+        case OpCode.NOP | OpCode.HALT:
+            return StallReason.NONE
+        case unreachable:
+            assert_never(unreachable)
+
+
 def run_timing(
     words: Sequence[int],
     *,
@@ -75,11 +98,25 @@ def run_timing(
     residency = _ResidencyTracker()
     total_cycles = 0
     active_compute_cycles = 0
+    dma_stalled_cycles = 0
+    compute_stalled_cycles = 0
 
     for word in words:
         instruction = decode(word)
         cycles = _CYCLE_TABLE[instruction.opcode]
         total_cycles += cycles
+        match _stall_reason(instruction.opcode):
+            case StallReason.NONE:
+                pass
+            case StallReason.DMA:
+                compute_stalled_cycles += cycles
+            case StallReason.COMPUTE:
+                dma_stalled_cycles += cycles
+            case StallReason.BOTH:
+                dma_stalled_cycles += cycles
+                compute_stalled_cycles += cycles
+            case unreachable:
+                assert_never(unreachable)
         match instruction.opcode:
             case OpCode.DMA_LOAD:
                 residency.write(instruction.reg_a, instruction.imm)
@@ -106,8 +143,8 @@ def run_timing(
     utilization = active_compute_cycles / total_cycles if total_cycles else 0.0
     return result, SimMetrics(
         total_cycles=total_cycles,
-        dma_stalled_cycles=0,
-        compute_stalled_cycles=0,
+        dma_stalled_cycles=dma_stalled_cycles,
+        compute_stalled_cycles=compute_stalled_cycles,
         matrix_array_utilization=utilization,
         scratchpad_utilization=residency.peak_bytes / SRAM_BYTES,
         bytes_transferred=0,
