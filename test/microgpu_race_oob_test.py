@@ -1,10 +1,9 @@
-"""Race-detection tests for the MicroGPU SIMT bytecode interpreter (Task 76).
+"""Race + OOB detection tests for the MicroGPU SIMT bytecode interpreter.
 
-The interpreter layers a non-fatal :class:`RaceWarning` on top of the
-run loop: it tracks per-register reads/writes and emits the warning
-for WAR (write-after-read) and WAW (write-after-write with
-intervening read) hazards. This file exercises that surface in
-isolation; the out-of-bounds tests live alongside once Task 77 lands.
+The interpreter layers two diagnostics on top of the run loop (Tasks
+76 and 77): a per-register WAR/WAW hazard warning (non-fatal) and an
+out-of-bounds :class:`MemoryOutOfBoundsError` (fatal). This file
+exercises both surfaces.
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ import pytest
 from backends.microgpu.asm import assemble
 from backends.microgpu.interp import (
     BYTES_PER_WORD,
+    MemoryOutOfBoundsError,
     RaceWarning,
     run,
 )
@@ -121,3 +121,72 @@ def test_detect_races_false_silences_warnings() -> None:
         run(assemble(program), memory=memory, registers=[3, 0] + [0] * 30, detect_races=False)
 
     assert not [w for w in caught if issubclass(w.category, RaceWarning)]
+
+# ---------------------------------------------------------------------------
+# Out-of-bounds detection (Task 77)
+# ---------------------------------------------------------------------------
+
+
+def test_load_global_raises_on_oob_address() -> None:
+    """A LOAD at an address that overruns the buffer raises OOB."""
+    program = "LOAD_GLOBAL  r0, [0xF]\nRETURN\n"
+    memory = bytearray(BYTES_PER_WORD * 4)
+
+    with pytest.raises(MemoryOutOfBoundsError) as exc:
+        _ = run(assemble(program), memory=memory)
+
+    assert exc.value.opcode == "LOAD_GLOBAL"
+    assert exc.value.address == 0xF * BYTES_PER_WORD
+    assert exc.value.memory_size == len(memory)
+
+
+def test_store_global_raises_on_oob_address() -> None:
+    """A STORE at an address that overruns the buffer raises OOB."""
+    program = (
+        "LOAD_GLOBAL  r0, [0x0]\n"
+        "STORE_GLOBAL r0, [0xF]\n"
+        "RETURN\n"
+    )
+    memory = bytearray(BYTES_PER_WORD * 4)
+
+    with pytest.raises(MemoryOutOfBoundsError) as exc:
+        _ = run(assemble(program), memory=memory)
+
+    assert exc.value.opcode == "STORE_GLOBAL"
+    assert exc.value.address == 0xF * BYTES_PER_WORD
+    assert exc.value.memory_size == len(memory)
+
+
+def test_oob_is_an_index_error_subclass() -> None:
+    """``MemoryOutOfBoundsError`` is catchable as ``IndexError`` too."""
+    program = "STORE_GLOBAL r0, [0xE]\nRETURN\n"
+    memory = bytearray(BYTES_PER_WORD * 2)
+
+    with pytest.raises(IndexError):
+        _ = run(assemble(program), memory=memory)
+
+
+def test_load_at_last_word_succeeds() -> None:
+    """A LOAD at the highest valid word address returns the buffered value."""
+    program = "LOAD_GLOBAL  r0, [0x3]\nRETURN\n"
+    memory = bytearray(BYTES_PER_WORD * 4)
+    memory[3 * BYTES_PER_WORD : 4 * BYTES_PER_WORD] = (99 & 0xFFFFFFFF).to_bytes(
+        BYTES_PER_WORD, "little", signed=False
+    )
+
+    state = run(assemble(program), memory=memory)
+    assert state.registers[0] == 99
+
+
+def test_store_at_last_word_succeeds() -> None:
+    """A STORE at the highest valid word address writes the buffered value."""
+    program = (
+        "LOAD_GLOBAL  r0, [0x0]\n"
+        "STORE_GLOBAL r0, [0x3]\n"
+        "RETURN\n"
+    )
+    memory = bytearray(BYTES_PER_WORD * 4)
+    memory[:BYTES_PER_WORD] = (1234 & 0xFFFFFFFF).to_bytes(BYTES_PER_WORD, "little", signed=False)
+
+    run(assemble(program), memory=memory)
+    assert int.from_bytes(memory[3 * BYTES_PER_WORD : 4 * BYTES_PER_WORD], "little") == 1234

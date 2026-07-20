@@ -9,12 +9,19 @@ reference is also what the C++ :class:`forge_rt::MicroGpuProvider`
 ultimately delegates to (via subprocess), so the test surface lives
 here.
 
-This module layers race detection on top of the run loop (Task 76):
-it tracks per-register reads/writes and emits a :class:`RaceWarning`
-to ``stderr`` for WAR (write-after-read) and WAW (write-after-write
-with intervening read) hazards. Detection is best-effort and
-non-fatal; the interpreter still executes the offending program so
-the diagnostics surface without aborting the host process.
+This module layers two diagnostics on top of the run loop:
+
+* **Race detection** (Task 76) — tracks per-register reads/writes and
+  emits a :class:`RaceWarning` to ``stderr`` for WAR (write-after-read)
+  and WAW (write-after-write with intervening read) hazards. Detection
+  is best-effort and non-fatal; the interpreter still executes the
+  offending program so the diagnostics surface without aborting the
+  host process.
+* **Out-of-bounds detection** (Task 77) — on ``LOAD_GLOBAL`` and
+  ``STORE_GLOBAL``, asserts that ``addr + BYTES_PER_WORD <= memory.size()``
+  and raises :class:`MemoryOutOfBoundsError` on violation. This catches
+  the most common shape bug in hand-written microcode (an immediate
+  field that runs off the end of the caller's buffer).
 
 Reference: spec §11.
 """
@@ -45,6 +52,18 @@ class RaceWarning(UserWarning):
     """Emitted on stderr for WAR/WAW register hazards (non-fatal)."""
 
 
+class MemoryOutOfBoundsError(IndexError):
+    """Raised when a LOAD/STORE_GLOBAL immediate exceeds the caller's buffer."""
+
+    def __init__(self, opcode: str, address: int, memory_size: int) -> None:
+        self.opcode = opcode
+        self.address = address
+        self.memory_size = memory_size
+        super().__init__(
+            f"{opcode} OOB: addr={address} + {BYTES_PER_WORD} > {memory_size}"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class InterpreterState:
     """Snapshot of the post-run register file."""
@@ -69,6 +88,12 @@ def _check_register(slot: int, what: str) -> None:
     """Reject register slots outside the 32-slot register file."""
     if not 0 <= slot < REGISTER_COUNT:
         raise ValueError(f"{what} register r{slot} out of range (0..31)")
+
+
+def _check_oob(opcode_name: str, address: int, memory_size: int) -> None:
+    """Raise :class:`MemoryOutOfBoundsError` if the load/store exceeds the buffer."""
+    if address + BYTES_PER_WORD > memory_size:
+        raise MemoryOutOfBoundsError(opcode_name, address, memory_size)
 
 
 def _check_reg_race(
@@ -152,6 +177,7 @@ def run(
             case OpCode.LOAD_GLOBAL:
                 _check_register(instr.dst, "LOAD_GLOBAL dst")
                 addr = instr.imm * BYTES_PER_WORD
+                _check_oob("LOAD_GLOBAL", addr, len(memory))
                 if detect_races:
                     _check_reg_race(
                         instr.dst,
@@ -168,6 +194,7 @@ def run(
             case OpCode.STORE_GLOBAL:
                 _check_register(instr.src, "STORE_GLOBAL src")
                 addr = instr.imm * BYTES_PER_WORD
+                _check_oob("STORE_GLOBAL", addr, len(memory))
                 if detect_races:
                     reg_reads.add(instr.src)
                     if instr.src in reg_writes:
@@ -236,6 +263,7 @@ def run(
 __all__ = (
     "BYTES_PER_WORD",
     "InterpreterState",
+    "MemoryOutOfBoundsError",
     "RaceWarning",
     "REGISTER_COUNT",
     "run",
