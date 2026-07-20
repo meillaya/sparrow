@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
+import backends.astra.sim as astra_sim
 from backends.astra.sim.functional import DRAM_BYTES, TILE_BYTES, TILE_DIM
 from backends.astra.sim.timing import SimMetrics, run_timing
 from compiler.lib.Dialect.Astra.assembler import assemble
@@ -28,3 +30,23 @@ HALT
     assert metrics.total_cycles == 33
     assert metrics.matrix_array_utilization == pytest.approx(20 / 33)
     assert 0.0 <= metrics.scratchpad_utilization <= 1.0
+
+
+def test_entry_point_cross_checks_functional_and_timing_outputs() -> None:
+    """Given one program, both public modes return equivalent tensors."""
+    program = f"""\
+DMA_LOAD dst=SRAM[0x0], src=DRAM[0x0], bytes={TILE_BYTES}
+VECTOR_GELU dst=SRAM[0x{TILE_BYTES:x}], src=SRAM[0x0], elements={TILE_DIM * TILE_DIM}
+DMA_STORE dst=DRAM[0x0], src=SRAM[0x{TILE_BYTES:x}], bytes={TILE_BYTES}
+HALT
+"""
+    words = assemble(program)
+
+    functional, functional_metrics = astra_sim.run_microcode(words)
+    timing, timing_metrics = astra_sim.run_microcode(words, mode="timing", metrics=True)
+
+    assert functional is not None
+    assert timing is not None
+    assert np.allclose(functional, timing, atol=1e-4, rtol=0.0)
+    assert functional_metrics is None
+    assert timing_metrics is not None
