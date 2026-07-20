@@ -7,10 +7,10 @@ Runs the complete vertical slice:
   3. Capture FX graph via ``torch.compile(backend="forgestack")`` semantics
      (the Phase 1 ``forge_torch.compile`` wrapper).
   4. Confirm ``forge.graph`` MLIR was produced (contains ``matmul``/``add``/``gelu``).
-  5. Run :mod:`forge-opt` to confirm the dialect roundtrip action works
-     (the lower action is best-effort in Phase 1 — it depends on whether
-     the GraphToTensor pass supports the exact op shape emitted by
-     FusedMLP).
+  5. Run :mod:`forge-opt` to confirm both the ``roundtrip`` and ``lower``
+     actions succeed; after Phases 2-8 the GraphToTensor pass covers the
+     canonical FusedMLP triple (matmul + add + gelu), so a lower failure
+     here is a Phase 1 regression.
   6. Run eager and compiled, assert :func:`validate` passes.
   7. Confirm the compilation report was emitted under ``.omo/evidence/``
      (only when the ``CompiledFusedMLP`` instance carries a report
@@ -99,11 +99,9 @@ def test_phase1_smoke_full_pipeline():
         f"forge.graph.gelu missing from MLIR:\n{mlir_text[:2000]}"
     )
 
-    # 5) Run forge-opt to confirm the dialect roundtrip works ----------------
-    #    The "lower" action is best-effort in Phase 1 (the GraphToTensor pass
-    #    may not cover every arithmetic shape yet); if it fails we don't want
-    #    that to derail the smoke test, since the more important check is
-    #    that the IR parses + verifies + re-prints.
+    # 5) Run forge-opt to confirm the dialect roundtrip + lower works --------
+    # Phase 1 regression guard: Phases 2-8 made the lower pipeline (forge.graph
+    # -> forge.tensor) complete for the canonical FusedMLP triple.
     lower = _run(
         [
             str(VENV_PYTHON),
@@ -114,10 +112,21 @@ def test_phase1_smoke_full_pipeline():
         input=mlir_text,
         cwd=REPO,
     )
-    # We don't assert `lower.returncode == 0` here on purpose: the lower
-    # action is forward-looking. We *do* capture it so failures show up in
-    # the evidence log.
-    lower_failed = lower.returncode != 0
+    assert lower.returncode == 0, (
+        f"forge-opt --action=lower failed (rc={lower.returncode}); "
+        "Phase 1 GraphToTensor regression after Phases 2-8.\n"
+        f"STDOUT:\n{lower.stdout[:2000]}\nSTDERR:\n{lower.stderr[:2000]}"
+    )
+    assert "forge.tensor.gemm" in lower.stdout, (
+        f"forge.tensor.gemm missing from lowered MLIR (Phase 1 regression):\n{lower.stdout[:2000]}"
+    )
+    assert "forge.tensor.broadcast_add" in lower.stdout, (
+        f"forge.tensor.broadcast_add missing from lowered MLIR "
+        f"(Phase 1 regression):\n{lower.stdout[:2000]}"
+    )
+    assert "forge.tensor.gelu" in lower.stdout, (
+        f"forge.tensor.gelu missing from lowered MLIR (Phase 1 regression):\n{lower.stdout[:2000]}"
+    )
 
     roundtrip = _run(
         [
@@ -164,13 +173,4 @@ def test_phase1_smoke_full_pipeline():
         pytest.skip(
             f"test_abi binary not found at {TEST_ABI_BIN}; "
             "C++ runtime not built — skipping runtime smoke check"
-        )
-
-    # Surface the lower-action status so it shows up in pytest -v output.
-    if lower_failed:
-        pytest.skip(
-            f"forge-opt --action=lower returned non-zero "
-            f"(rc={lower.returncode}); Phase 1 lower pipeline may not "
-            f"yet cover the exact op set emitted by FusedMLP. "
-            f"STDERR (truncated): {lower.stderr[:500]}"
         )
