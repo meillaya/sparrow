@@ -40,8 +40,39 @@ lit -v compiler/test/
 echo
 
 # Step 3: Python pytest (frontend + backends + end-to-end + cache + report)
+#                      + Phases 2-8: astra + microcode + microgpu + memory + scheduler
+# pytest auto-discovers test_*.py / *_test.py recursively under test/, so the
+# explicit file list below is a defensive safety net (pytest dedupes by id).
 echo "[ci] Step 3: pytest"
-pytest test/ -v --tb=short
+pytest test/ \
+    test/test_functional.py \
+    test/test_timing.py \
+    test/test_scratchpad_utilization.py \
+    test/test_dma_compute_stall.py \
+    test/emit_astra_test.py \
+    test/microcode_test.py \
+    test/microcode_asm_test.py \
+    test/microgpu_isa_test.py \
+    test/microgpu_asm_test.py \
+    test/microgpu_interp_test.py \
+    test/microgpu_race_oob_test.py \
+    test/frontend/test_cache_determinism.py \
+    test/frontend/test_report_fields_complete.py \
+    test/frontend/test_fx_importer_symbolic.py \
+    test/frontend/test_dynamic_compile.py \
+    test/end_to_end/test_canonicalize_differential.py \
+    test/end_to_end/test_shape_inference_differential.py \
+    test/end_to_end/test_fusion_differential.py \
+    test/end_to_end/test_chained_optimize.py \
+    test/end_to_end/test_fused_mlp_dtypes.py \
+    test/end_to_end/test_memory_planning_e2e.py \
+    test/end_to_end/test_scheduler_e2e.py \
+    test/end_to_end/test_memory_report.py \
+    test/end_to_end/test_astra_e2e.py \
+    test/end_to_end/test_cross_provider.py \
+    test/end_to_end/test_microgpu_e2e.py \
+    test/end_to_end/test_microgpu_race_oob.py \
+    -v --tb=short
 echo
 
 # Step 4: Lint + format check
