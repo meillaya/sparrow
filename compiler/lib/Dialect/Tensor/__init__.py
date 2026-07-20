@@ -618,6 +618,109 @@ class SoftmaxOp(IRDLOperation):
 
 
 # ---------------------------------------------------------------------------
+# Scaled dot product attention op
+# ---------------------------------------------------------------------------
+
+
+@irdl_op_definition
+class ScaledDotProductAttentionOp(IRDLOperation):
+    """
+    `forge.tensor.scaled_dot_product_attention` — fused Q @ K^T / sqrt(d_k)
+    + softmax + @V attention kernel. The op is shape-preserving for the
+    Q/K/V triple (``Q.shape == K.shape == V.shape == [B, S, d_model]``)
+    and returns the same shape as the inputs.
+
+    The optional ``num_heads`` property (default ``1``) tells the codegen
+    backend how to split the head dimension when emitting the underlying
+    matmul. It does NOT change the IR's input/output shapes (multi-head
+    reshape is a backend-internal optimisation owned by Task 14+).
+
+    This op is **terminal**: Phase 1's fusion pass should not try to fold
+    other ops into / out of it (it's already a fully-fused attention
+    primitive). The verifier here is shape-only — semantic checks
+    (causal mask, dropout, etc.) belong to the backend.
+
+        Q    : !forge.tensor<BxSxD>
+        K    : !forge.tensor<BxSxD>
+        V    : !forge.tensor<BxSxD>
+        out  : !forge.tensor<BxSxD>
+
+    Verifier:
+        * Q.shape == K.shape == V.shape (static parts; symbolic dims accepted)
+        * out.shape == Q.shape
+        * num_heads >= 1
+        * all four operands/result share one dtype
+    """
+
+    name = "forge.tensor.scaled_dot_product_attention"
+    num_heads = opt_prop_def(IntAttr, default_value=IntAttr(1))
+    q = operand_def(TensorType)
+    k = operand_def(TensorType)
+    v = operand_def(TensorType)
+    out = result_def(TensorType)
+
+    traits = traits_def(Pure(), NoMemoryEffect())
+
+    irdl_options = (ParsePropInAttrDict(),)
+    assembly_format = (
+        "$q `,` $k `,` $v attr-dict `:` "
+        "`(` type($q) `,` type($k) `,` type($v) `)` `->` type($out)"
+    )
+
+    def __init__(self, q, k, v, num_heads: int = 1, result_type=None):
+        properties = {"num_heads": IntAttr(int(num_heads))}
+        if result_type is not None:
+            super().__init__(
+                operands=[q, k, v],
+                result_types=[result_type],
+                properties=properties,
+            )
+        else:
+            super().__init__(operands=[q, k, v], properties=properties)
+
+    def verify_(self) -> None:
+        q_type = _check_tensor(self.q, "forge.tensor.scaled_dot_product_attention operand 'q'")
+        k_type = _check_tensor(self.k, "forge.tensor.scaled_dot_product_attention operand 'k'")
+        v_type = _check_tensor(self.v, "forge.tensor.scaled_dot_product_attention operand 'v'")
+        out_type = _check_tensor(
+            self.out, "forge.tensor.scaled_dot_product_attention result"
+        )
+
+        if int(self.num_heads.data) < 1:
+            raise VerifyException(
+                "forge.tensor.scaled_dot_product_attention num_heads must be "
+                f">= 1, got {int(self.num_heads.data)}"
+            )
+
+        if q_type.dtype != k_type.dtype or q_type.dtype != v_type.dtype:
+            raise VerifyException(
+                "forge.tensor.scaled_dot_product_attention Q/K/V dtypes must "
+                f"match: got q={q_type.dtype}, k={k_type.dtype}, v={v_type.dtype}"
+            )
+        if out_type.dtype != q_type.dtype:
+            raise VerifyException(
+                "forge.tensor.scaled_dot_product_attention result dtype must "
+                f"match operand dtype: got {out_type.dtype}, expected "
+                f"{q_type.dtype}"
+            )
+
+        q_shape = _static_shape(q_type)
+        k_shape = _static_shape(k_type)
+        v_shape = _static_shape(v_type)
+        if q_shape != k_shape or q_shape != v_shape:
+            raise VerifyException(
+                "forge.tensor.scaled_dot_product_attention Q/K/V shapes must "
+                f"match: got q={q_shape}, k={k_shape}, v={v_shape}"
+            )
+        if _static_shape(out_type) != q_shape:
+            raise VerifyException(
+                "forge.tensor.scaled_dot_product_attention result shape must "
+                f"equal Q shape: got {_static_shape(out_type)}, expected "
+                f"{q_shape}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Dialect registration
 # ---------------------------------------------------------------------------
 
@@ -631,6 +734,7 @@ TensorDialect = Dialect(
         GeluOp,
         LayerNormOp,
         SoftmaxOp,
+        ScaledDotProductAttentionOp,
     ],
     [
         ActivationAttr,
