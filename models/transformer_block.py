@@ -12,11 +12,12 @@ Architecture:
   → MLP: Linear(d_model, d_ff) → gelu → Linear(d_ff, d_model)
   → + x                          # residual
 
-LayerNorm is implemented as a manual mean/var computation (not nn.LayerNorm)
-and the linears are constructed via a ``_Linear`` wrapper around
-``F.linear`` + ``nn.Parameter`` so that ``torch.fx.symbolic_trace`` does
-not emit ``get_attr`` nodes for ``self.weight`` / ``self.bias`` (which the
-Phase 1-8 FX importer does not yet lower).
+LayerNorm is implemented as a manual mean/var computation (not nn.LayerNorm).
+Linears are constructed via ``_make_linear`` which stores ``weight`` / ``bias``
+as Python closure variables (not module attributes) so that
+``torch.fx.symbolic_trace`` captures them as free variables / placeholders
+— NOT as ``get_attr`` nodes that the Phase 1-8 FX importer rejects with
+``KeyError: 'unknown FX op target: <built-in function getattr>'``.
 """
 
 from __future__ import annotations
@@ -34,27 +35,27 @@ def _layer_norm(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     return (x - mean) / torch.sqrt(var + eps)
 
 
-class _Linear(nn.Module):
-    """A ``Linear``-equivalent whose FX trace uses call_function only.
+def _make_linear(in_features: int, out_features: int, bias: bool = True) -> nn.Module:
+    """Build a Linear-equivalent module using closure-bound weights.
 
-    Wraps ``F.linear(x, weight, bias)``; ``self.weight`` / ``self.bias`` are
-    declared as :class:`nn.Parameter` so the FX symbolic tracer follows the
-    attribute references through ``call_function`` (which the shipped FX
-    importer handles) rather than ``get_attr`` (which it raises on).
+    Storing ``weight`` / ``bias`` as Python closure variables (not module
+    attributes) means ``torch.fx.symbolic_trace`` captures them as free
+    variables in the traced graph — NOT as ``get_attr`` nodes (which the
+    Phase 1-8 FX importer cannot lower).
     """
+    weight = torch.empty(out_features, in_features)
+    nn.init.kaiming_uniform_(weight, a=math.sqrt(5))
+    bias_tensor = torch.zeros(out_features) if bias else None
+    if bias_tensor is not None:
+        fan_in = in_features
+        bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
+        nn.init.uniform_(bias_tensor, -bound, bound)
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = True):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty(out_features, in_features))
-        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
-        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        if self.bias is not None:
-            fan_in = in_features
-            bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
-            nn.init.uniform_(self.bias, -bound, bound)
+    class _ClosureLinear(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return F.linear(x, weight, bias_tensor)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(x, self.weight, self.bias)
+    return _ClosureLinear()
 
 
 class TransformerBlock(nn.Module):
@@ -68,10 +69,10 @@ class TransformerBlock(nn.Module):
         self.head_dim = d_model // n_heads
         self.d_ff = d_ff
 
-        self.qkv = _Linear(d_model, d_model * 3)
-        self.out = _Linear(d_model, d_model)
-        self.mlp_in = _Linear(d_model, d_ff)
-        self.mlp_out = _Linear(d_ff, d_model)
+        self.qkv = _make_linear(d_model, d_model * 3)
+        self.out = _make_linear(d_model, d_model)
+        self.mlp_in = _make_linear(d_model, d_ff)
+        self.mlp_out = _make_linear(d_ff, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, S, D = x.shape
