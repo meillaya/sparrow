@@ -81,3 +81,15 @@ target_link_libraries(test_execution_plan
         GTest::gtest_main
 )
 gtest_discover_tests(test_execution_plan)
+
+# Wave 14 — AstraDeviceProvider wraps the in-process Python simulator.
+# Verifies the launch path that fires a `python3 -c <script>` subprocess
+# against the project's .venv and parses a base64 tensor payload back.
+add_executable(test_astra_provider test_astra_provider.cpp)
+target_link_libraries(test_astra_provider
+    PRIVATE
+        forgestack::runtime
+        GTest::gtest
+        GTest::gtest_main
+)
+gtest_discover_tests(test_astra_provider)
