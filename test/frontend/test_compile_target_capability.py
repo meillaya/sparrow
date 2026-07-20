@@ -53,12 +53,12 @@ def test_target_astra_emits_warning_for_unsupported_op() -> None:
     Astra's microcode ISA does not include softmax
     (``backends/astra/sim/timing.py`` has no ``SIGMOID`` / ``SOFTMAX``
     instruction), so the capability check must surface this mismatch as
-    a :class:`UserWarning` rather than silently dropping the op. The
-    subsequent ``NotImplementedError`` from the Phase 1 FX importer is a
-    separate concern — the FX importer cannot lower ``aten.softmax`` yet
-    (Tasks 12 + 14 of Phase 7 wire the dialect + importer); what we
-    verify here is that the capability warning fires *before* the
-    importer runs.
+    a :class:`UserWarning` rather than silently dropping the op.
+
+    Phase 7 Tasks 12 + 14 wired ``aten.softmax`` into ``forge.tensor.softmax``
+    + the FX importer, so the compiled path now succeeds (delegates to
+    eager per Phase 1 backwards-compat) — we verify the capability
+    warning still fires *before* the eager fallback runs.
     """
 
     class HasSoftmax(nn.Module):
@@ -68,11 +68,11 @@ def test_target_astra_emits_warning_for_unsupported_op() -> None:
     m = HasSoftmax()
     x = torch.randn(2, 16, dtype=torch.float32)
 
-    with (
-        pytest.warns(UserWarning, match="forge.tensor.softmax"),
-        pytest.raises(NotImplementedError),
-    ):
-        compile(m, [x], target="astra")
+    with pytest.warns(UserWarning, match="forge.tensor.softmax"):
+        compiled = compile(m, [x], target="astra")
+        out = compiled(x)
+        eager = m(x)
+        assert torch.allclose(out, eager, atol=1e-5)
 
 
 def test_target_triton_no_warning_for_supported_ops() -> None:
