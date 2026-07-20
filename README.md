@@ -24,29 +24,36 @@ Three backends live today: **Triton-CPU** (Phase 1), **Astra-sim** (Phase 4 micr
 ## Quick start
 
 ```bash
-# One-time bootstrap (uv venv + torch + xdsl + ruff + ty)
-bash scripts/setup-env.sh
+# Enter the Nix-managed dev shell (cmake, ninja, python312, torch, xdsl, ruff, ty)
+devenv shell bash -c '
+  # Activate the uv-managed venv for runtime deps (torch, xdsl, etc.)
+  source .venv/bin/activate
 
-# Activate + verify the environment
-source .venv/bin/activate
-bash scripts/probe-env.sh
+  # Verify the toolchain
+  bash scripts/probe-env.sh
 
-# Hello FusedMLP
-python3 -c "
-import torch
-from forge_torch.backend import compile
-from forge_torch.conftest import FusedMLP
-m = FusedMLP()
-x, w, b = torch.randn(2, 512, 4096), torch.randn(4096, 11008), torch.randn(11008)
-c = compile(m, [x, w, b])
-out = c(x, w, b)
-assert torch.allclose(out, m(x, w, b), atol=1e-4)
-print('hello forgestack:', tuple(out.shape))
-"
+  # Hello FusedMLP
+  python3 -c "
+  import torch
+  from forge_torch.backend import compile
+  from forge_torch.conftest import FusedMLP
+  m = FusedMLP()
+  x, w, b = torch.randn(2, 512, 4096), torch.randn(4096, 11008), torch.randn(11008)
+  c = compile(m, [x, w, b])
+  out = c(x, w, b)
+  assert torch.allclose(out, m(x, w, b), atol=1e-4)
+  print(\"hello forgestack:\", tuple(out.shape))
+  "
 
-# Run the full gate (lit + pytest + ctest + ruff + ty)
-bash scripts/ci.sh
+  # Run the full gate (lit + pytest + ctest + ruff + ty)
+  bash scripts/ci.sh
+'
 ```
+
+The `bash scripts/setup-env.sh` path is the fallback for hosts where `devenv shell`
+isn't available (e.g. CI runners without Nix). For local dev, `devenv shell` is
+the canonical entry — it provides cmake / ninja / system test headers that
+the venv alone doesn't have.
 
 ## Repository layout
 
