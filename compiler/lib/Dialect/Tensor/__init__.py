@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from xdsl.dialects.builtin import BoolAttr, FloatAttr, Float32Type, IntAttr
+from xdsl.dialects.builtin import BoolAttr, Float32Type, FloatAttr, IntAttr
 from xdsl.ir import Dialect, EnumAttribute, SSAValue
 from xdsl.irdl import (
     IRDLOperation,
@@ -440,9 +440,7 @@ class LayerNormOp(IRDLOperation):
     # FloatAttr needs an explicit `type` argument (the float width). We
     # pick fp32 to match the canonical epsilon constant in PyTorch's
     # nn.LayerNorm; downstream codegen widens if the input dtype demands.
-    epsilon = opt_prop_def(
-        FloatAttr, default_value=FloatAttr(1e-5, Float32Type())
-    )
+    epsilon = opt_prop_def(FloatAttr, default_value=FloatAttr(1e-5, Float32Type()))
     input = operand_def(TensorType)
     gamma = operand_def(TensorType)
     beta = operand_def(TensorType)
@@ -504,19 +502,16 @@ class LayerNormOp(IRDLOperation):
         beta_shape = _static_shape(beta_type)
         if len(gamma_shape) != 1:
             raise VerifyException(
-                "forge.tensor.layer_norm gamma must be 1D, got "
-                f"shape {gamma_shape}"
+                f"forge.tensor.layer_norm gamma must be 1D, got shape {gamma_shape}"
             )
         if len(beta_shape) != 1:
             raise VerifyException(
-                "forge.tensor.layer_norm beta must be 1D, got "
-                f"shape {beta_shape}"
+                f"forge.tensor.layer_norm beta must be 1D, got shape {beta_shape}"
             )
         input_shape = _static_shape(input_type)
         if len(input_shape) < 1:
             raise VerifyException(
-                "forge.tensor.layer_norm input must have rank >= 1, got "
-                f"shape {input_shape}"
+                f"forge.tensor.layer_norm input must have rank >= 1, got shape {input_shape}"
             )
         last_dim = input_shape[-1]
         # Only check the size when gamma is statically known (no -1 entry);
@@ -570,9 +565,7 @@ class SoftmaxOp(IRDLOperation):
     traits = traits_def(Pure(), NoMemoryEffect())
 
     irdl_options = (ParsePropInAttrDict(),)
-    assembly_format = (
-        "$input attr-dict `:` `(` type($input) `)` `->` type($out)"
-    )
+    assembly_format = "$input attr-dict `:` `(` type($input) `)` `->` type($out)"
 
     def __init__(self, input, dim: int = -1, result_type=None):
         properties = {"dim": IntAttr(int(dim))}
@@ -663,8 +656,7 @@ class ScaledDotProductAttentionOp(IRDLOperation):
 
     irdl_options = (ParsePropInAttrDict(),)
     assembly_format = (
-        "$q `,` $k `,` $v attr-dict `:` "
-        "`(` type($q) `,` type($k) `,` type($v) `)` `->` type($out)"
+        "$q `,` $k `,` $v attr-dict `:` `(` type($q) `,` type($k) `,` type($v) `)` `->` type($out)"
     )
 
     def __init__(self, q, k, v, num_heads: int = 1, result_type=None):
@@ -682,9 +674,7 @@ class ScaledDotProductAttentionOp(IRDLOperation):
         q_type = _check_tensor(self.q, "forge.tensor.scaled_dot_product_attention operand 'q'")
         k_type = _check_tensor(self.k, "forge.tensor.scaled_dot_product_attention operand 'k'")
         v_type = _check_tensor(self.v, "forge.tensor.scaled_dot_product_attention operand 'v'")
-        out_type = _check_tensor(
-            self.out, "forge.tensor.scaled_dot_product_attention result"
-        )
+        out_type = _check_tensor(self.out, "forge.tensor.scaled_dot_product_attention result")
 
         if int(self.num_heads.data) < 1:
             raise VerifyException(

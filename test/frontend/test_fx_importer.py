@@ -120,3 +120,81 @@ def test_compile_callable_returns_eager_result(fused_mlp_inputs):
     assert torch.allclose(got, eager, atol=1e-5)
     assert got.shape == eager.shape
     assert got.dtype == eager.dtype
+
+
+def test_layer_norm_importer():
+    """``aten.layer_norm`` (via ``F.layer_norm``) → ``forge.tensor.layer_norm``.
+
+    The test passes weight + bias as positional kwargs (matching PyTorch's
+    ``F.layer_norm(x, [shape], weight, bias)`` calling convention) so the
+    FX graph captures them as plain tensor placeholders via ``node.kwargs``.
+    The ``normalized_shape`` is a constant list to avoid ``x.size(-1)`` /
+    ``getattr`` traces that the Phase-1 importer doesn't resolve.
+    """
+
+    class HasLayerNorm(torch.nn.Module):
+        def forward(self, x, w, b):
+            return torch.nn.functional.layer_norm(x, [64], w, b)
+
+    x = torch.randn(2, 16, 64)
+    w = torch.ones(64)
+    b = torch.zeros(64)
+    gm = torch.fx.symbolic_trace(HasLayerNorm())
+    mlir = FxImporter([x, w, b]).import_graph(gm)
+
+    assert "forge.tensor.layer_norm" in mlir
+    assert "forge.graph.layer_norm" not in mlir
+
+    rounded = _module_roundtrip(mlir)
+    assert "forge.tensor.layer_norm" in rounded
+
+
+def test_softmax_importer():
+    """``aten.softmax`` (via ``F.softmax``) → ``forge.tensor.softmax``.
+
+    The dim arg is passed as a kwarg (matching PyTorch's
+    ``F.softmax(x, dim=-1)`` signature); the importer pulls it out of
+    ``node.kwargs['dim']`` via :func:`_extract_softmax_dim`.
+    """
+
+    class HasSoftmax(torch.nn.Module):
+        def forward(self, x):
+            return torch.nn.functional.softmax(x, dim=-1)
+
+    x = torch.randn(2, 16, 32)
+    gm = torch.fx.symbolic_trace(HasSoftmax())
+    mlir = FxImporter([x]).import_graph(gm)
+
+    assert "forge.tensor.softmax" in mlir
+    assert "forge.graph.softmax" not in mlir
+
+    rounded = _module_roundtrip(mlir)
+    assert "forge.tensor.softmax" in rounded
+
+
+def test_sdpa_importer():
+    """``aten.scaled_dot_product_attention`` → ``forge.tensor.scaled_dot_product_attention``.
+
+    The Python wrapper ``F.scaled_dot_product_attention(q, k, v)`` captures
+    as ``call_function <built-in function scaled_dot_product_attention>``
+    in the FX graph; ``op_mapping.normalize_target`` reduces this to
+    ``aten.scaled_dot_product_attention``. The importer emits a single
+    fused op (no ``aten.bmm``/``aten.transpose`` decomposition) so the
+    downstream codegen can run the fused attention kernel.
+    """
+
+    class HasSDPA(torch.nn.Module):
+        def forward(self, q, k, v):
+            return torch.nn.functional.scaled_dot_product_attention(q, k, v)
+
+    q = torch.randn(2, 16, 64)
+    k = torch.randn(2, 16, 64)
+    v = torch.randn(2, 16, 64)
+    gm = torch.fx.symbolic_trace(HasSDPA())
+    mlir = FxImporter([q, k, v]).import_graph(gm)
+
+    assert "forge.tensor.scaled_dot_product_attention" in mlir
+    assert "forge.graph.scaled_dot_product_attention" not in mlir
+
+    rounded = _module_roundtrip(mlir)
+    assert "forge.tensor.scaled_dot_product_attention" in rounded

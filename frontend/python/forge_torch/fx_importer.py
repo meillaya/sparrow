@@ -226,7 +226,19 @@ class FxImporter:
                     "in Phase 1 (would need symbolic-shape inference)."
                 )
             return forge_tensor(list(target_shape), _dtype_str(operand))
-        raise AssertionError(f"unknown forge.graph op: {target_name!r}")  # pragma: no cover
+        # Task 14 tensor-dialect ops (route directly to forge.tensor.*,
+        # bypassing the GraphToTensor pass — these were not modelled in
+        # the Phase 1 forge.graph dialect).
+        if target_name == "forge.tensor.layer_norm":
+            operand = _expect_tensor(operand_types[0], forge_tensor)
+            return forge_tensor(list(_shape_seq(operand)), _dtype_str(operand))
+        if target_name == "forge.tensor.softmax":
+            operand = _expect_tensor(operand_types[0], forge_tensor)
+            return forge_tensor(list(_shape_seq(operand)), _dtype_str(operand))
+        if target_name == "forge.tensor.scaled_dot_product_attention":
+            operand = _expect_tensor(operand_types[0], forge_tensor)
+            return forge_tensor(list(_shape_seq(operand)), _dtype_str(operand))
+        raise AssertionError(f"unknown forge op: {target_name!r}")  # pragma: no cover
 
     # ------------------------------------------------------------------
     # Op emission (pass 2)
@@ -241,7 +253,7 @@ class FxImporter:
         target_name = map_node_to_forge(node.target)
         operands = [ssa_values[n] for n in _data_arg_names(node)]
         result_type = self._result_type_for(node, operands)
-        op = _build_op(target_name, operands, result_type)
+        op = _build_op(target_name, operands, result_type, node)
         builder.insert(op)
         ssa_values[node.name] = op.results[0]
 
@@ -274,7 +286,17 @@ class FxImporter:
                     "in Phase 1 (would need symbolic-shape inference)."
                 )
             return forge_tensor(list(target_shape), _dtype_str(operand_type))
-        raise AssertionError(f"unknown forge.graph op: {target_name!r}")  # pragma: no cover
+        # Task 14 tensor-dialect ops — see note in `_infer_call_type`.
+        if target_name == "forge.tensor.layer_norm":
+            operand_type = _expect_tensor(operands[0].type, forge_tensor)
+            return forge_tensor(list(_shape_seq(operand_type)), _dtype_str(operand_type))
+        if target_name == "forge.tensor.softmax":
+            operand_type = _expect_tensor(operands[0].type, forge_tensor)
+            return forge_tensor(list(_shape_seq(operand_type)), _dtype_str(operand_type))
+        if target_name == "forge.tensor.scaled_dot_product_attention":
+            operand_type = _expect_tensor(operands[0].type, forge_tensor)
+            return forge_tensor(list(_shape_seq(operand_type)), _dtype_str(operand_type))
+        raise AssertionError(f"unknown forge op: {target_name!r}")  # pragma: no cover
 
     # ------------------------------------------------------------------
     # Helpers
@@ -394,6 +416,10 @@ class FxImporter:
     @staticmethod
     def _load_graph_dialect():
         return importlib.import_module("compiler.lib.Dialect.Graph")
+
+    @staticmethod
+    def _load_tensor_dialect():
+        return importlib.import_module("compiler.lib.Dialect.Tensor")
 
     @staticmethod
     def _forge_tensor_cls():
@@ -542,6 +568,11 @@ def _data_arg_names(node: Node) -> list[str]:
     literal (constant / kwarg-passed shape list). Only the Nodes correspond
     to ``forge.tensor`` SSAValues; everything else is filtered here so the
     downstream ``ssa_values`` lookup is unambiguous.
+
+    Kwargs are scanned too: ``aten.layer_norm(x, [shape], weight=w, bias=b)``
+    passes the weight + bias Nodes via kwargs, and the ForgeStack importer
+    needs them as SSA operands. Keyword-only constants (e.g. ``eps=1e-5``)
+    are filtered just like positional constants.
     """
     names = []
     for arg in node.args:
@@ -549,6 +580,9 @@ def _data_arg_names(node: Node) -> list[str]:
             names.append(arg.name)
         elif isinstance(arg, (tuple, list)):
             continue
+    for arg in getattr(node, "kwargs", {}).values():
+        if isinstance(arg, Node):
+            names.append(arg.name)
     return names
 
 
@@ -581,7 +615,7 @@ def _extract_view_target_shape(node: Node) -> list[int] | None:
     return None
 
 
-def _build_op(target_name: str, operands: list, result_type):
+def _build_op(target_name: str, operands: list, result_type, node: Node | None = None):
     graph_mod = FxImporter._load_graph_dialect()
     if target_name == "forge.graph.matmul":
         return graph_mod.MatmulOp.create(operands=operands, result_types=[result_type])
@@ -591,4 +625,65 @@ def _build_op(target_name: str, operands: list, result_type):
         return graph_mod.GeluOp.create(operands=operands, result_types=[result_type])
     if target_name == "forge.graph.view":
         return graph_mod.ViewOp.create(operands=operands, result_types=[result_type])
-    raise AssertionError(f"_build_op: unknown forge.graph op {target_name!r}")  # pragma: no cover
+    # Task 14 tensor-dialect ops — see note in `_infer_call_type`.
+    tensor_mod = FxImporter._load_tensor_dialect()
+    if target_name == "forge.tensor.layer_norm":
+        return tensor_mod.LayerNormOp.create(
+            operands=operands,
+            result_types=[result_type],
+            properties={
+                "epsilon": tensor_mod.FloatAttr(
+                    float(_extract_layer_norm_eps(node)), tensor_mod.Float32Type()
+                ),
+            },
+        )
+    if target_name == "forge.tensor.softmax":
+        return tensor_mod.SoftmaxOp.create(
+            operands=operands,
+            result_types=[result_type],
+            properties={"dim": tensor_mod.IntAttr(int(_extract_softmax_dim(node)))},
+        )
+    if target_name == "forge.tensor.scaled_dot_product_attention":
+        return tensor_mod.ScaledDotProductAttentionOp.create(
+            operands=operands,
+            result_types=[result_type],
+            properties={"num_heads": tensor_mod.IntAttr(1)},
+        )
+    raise AssertionError(f"_build_op: unknown forge op {target_name!r}")  # pragma: no cover
+
+
+def _extract_layer_norm_eps(node: Node | None) -> float:
+    """Pull the ``eps`` positional arg out of an ``aten.layer_norm`` FX node.
+
+    ``aten.layer_norm`` is ``(input, normalized_shape, weight, bias, eps)``
+    positionally, so eps sits at ``args[4]``. Fall back to the dialect
+    default (``1e-5``) if the arg is missing / not a real number — happens
+    in synthetic FX graphs that elide the eps arg.
+    """
+    if node is None:
+        return 1e-5
+    args = list(getattr(node, "args", ()))
+    if len(args) >= 5 and isinstance(args[4], (int, float)):
+        return float(args[4])
+    return 1e-5
+
+
+def _extract_softmax_dim(node: Node | None) -> int:
+    """Pull the ``dim`` arg out of an ``aten.softmax`` FX node.
+
+    The Aten spelling ``aten.softmax(input, dim, dtype=None)`` is positional;
+    but ``torch.fx.symbolic_trace`` of the Python wrapper
+    ``torch.nn.functional.softmax(x, dim=-1, dtype=None)`` captures ``dim``
+    as a kwarg. Check both args[1] and kwargs['dim'] so the importer works
+    on either capture mode.
+    """
+    if node is None:
+        return -1
+    args = list(getattr(node, "args", ()))
+    if len(args) >= 2 and isinstance(args[1], int) and not isinstance(args[1], bool):
+        return args[1]
+    kwargs = getattr(node, "kwargs", {}) or {}
+    dim_v = kwargs.get("dim")
+    if isinstance(dim_v, int) and not isinstance(dim_v, bool):
+        return dim_v
+    return -1

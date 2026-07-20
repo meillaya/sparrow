@@ -13,6 +13,13 @@ Supported ops (shipped scope)
 ``aten.view`` / ``aten._unsafe_view`` → ``forge.graph.view``
 (the latter is the stride-bypassing variant FX emits around ``aten.mm``)
 
+``aten.layer_norm``                       → ``forge.tensor.layer_norm``
+``aten.softmax``                          → ``forge.tensor.softmax``
+``aten.scaled_dot_product_attention``     → ``forge.tensor.scaled_dot_product_attention``
+(these three are Task 14 additions — they route directly into the
+``forge.tensor`` dialect rather than ``forge.graph`` because they were
+not modelled in the Phase 1 graph dialect.)
+
 Recognised-but-not-yet-implemented (raise :class:`NotImplementedError`)
 -----------------------------------------------------------------------
 ``aten.relu`` / ``aten.silu`` / ``aten.mul`` — activations/elementwise;
@@ -20,7 +27,6 @@ Recognised-but-not-yet-implemented (raise :class:`NotImplementedError`)
 ``aten.reshape`` / ``aten.permute`` / ``aten.transpose`` — not lowered today.
 ``aten.sum`` / ``aten.mean`` — reductions, not lowered today.
 ``aten.bmm`` / ``aten.baddbmm`` — batched matmul, not lowered today.
-``aten.layer_norm`` / ``aten.softmax`` — not lowered today.
 
 DType translation
 -----------------
@@ -33,7 +39,10 @@ from __future__ import annotations
 
 import torch
 
-# Maps torch.fx node.op strings to the corresponding forge.graph op name.
+# Maps torch.fx node.op strings to the corresponding forge op name. Phase 1
+# ops route to ``forge.graph.*``; Task 14's tensor-dialect additions route
+# directly to ``forge.tensor.*`` (the FX importer emits the latter without
+# going through the GraphToTensor pass).
 SUPPORTED_ATEN_OPS: dict[str, str] = {
     "aten.mm": "forge.graph.matmul",
     "aten.matmul": "forge.graph.matmul",
@@ -41,6 +50,9 @@ SUPPORTED_ATEN_OPS: dict[str, str] = {
     "aten.gelu": "forge.graph.gelu",
     "aten.view": "forge.graph.view",
     "aten._unsafe_view": "forge.graph.view",
+    "aten.layer_norm": "forge.tensor.layer_norm",
+    "aten.softmax": "forge.tensor.softmax",
+    "aten.scaled_dot_product_attention": "forge.tensor.scaled_dot_product_attention",
 }
 
 # Operations that are recognised but NOT YET IMPLEMENTED in Phase 1 forge.graph.
@@ -55,8 +67,6 @@ UNSUPPORTED_BUT_RECOGNISED: frozenset[str] = frozenset(
         "aten.transpose",
         "aten.sum",
         "aten.mean",
-        "aten.layer_norm",
-        "aten.softmax",
         "aten.bmm",
         "aten.baddbmm",  # batched matmul, not lowered today
     }
