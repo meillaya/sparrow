@@ -100,6 +100,7 @@ def run_timing(
     active_compute_cycles = 0
     dma_stalled_cycles = 0
     compute_stalled_cycles = 0
+    bytes_transferred = 0
 
     for word in words:
         instruction = decode(word)
@@ -119,8 +120,10 @@ def run_timing(
                 assert_never(unreachable)
         match instruction.opcode:
             case OpCode.DMA_LOAD:
+                bytes_transferred += instruction.imm
                 residency.write(instruction.reg_a, instruction.imm)
             case OpCode.DMA_STORE:
+                bytes_transferred += instruction.imm
                 residency.free(instruction.reg_b, instruction.imm)
             case OpCode.MATMUL:
                 active_compute_cycles += cycles
@@ -147,5 +150,5 @@ def run_timing(
         compute_stalled_cycles=compute_stalled_cycles,
         matrix_array_utilization=utilization,
         scratchpad_utilization=residency.peak_bytes / SRAM_BYTES,
-        bytes_transferred=0,
+        bytes_transferred=bytes_transferred,
     )

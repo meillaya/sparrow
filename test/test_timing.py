@@ -120,3 +120,16 @@ def test_random_microcode_functional_matches_timing_bytes(seed: int) -> None:
 
     assert functional.dram_writes == timing.dram_writes
     assert functional.sram == timing.sram
+
+
+def test_bytes_transferred_sums_dma_loads_and_stores() -> None:
+    program = """\
+DMA_LOAD dst=SRAM[0x0], src=DRAM[0x0], bytes=32
+DMA_LOAD dst=SRAM[0x20], src=DRAM[0x20], bytes=64
+DMA_STORE dst=DRAM[0x100], src=SRAM[0x0], bytes=16
+HALT
+"""
+
+    _, metrics = run_timing(assemble(program), dram=bytearray(DRAM_BYTES))
+
+    assert metrics.bytes_transferred == 32 + 64 + 16
