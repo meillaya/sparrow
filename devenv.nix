@@ -25,8 +25,22 @@
     pkgs.pkg-config
 
     pkgs.python312
-    pkgs.python312Packages.pytorch
-    pkgs.python312Packages.xdsl
+    pkgs.python312Packages.torch
+    (pkgs.python312Packages.buildPythonPackage {
+      pname = "xdsl";
+      version = "0.68.0";
+      format = "wheel";
+      src = pkgs.fetchurl {
+        url = "https://files.pythonhosted.org/packages/90/8b/cfb8ffa62933b2fb9e6c8d718e2c08b0ac6e4f57e81629dda59db5ae8a3d/xdsl-0.68.0-py3-none-any.whl";
+        hash = "sha256-nyjXIqGCjfd7cRKKWnJa263a/PbiDetN6FpVy1PY6Qw=";
+      };
+      dependencies = with pkgs.python312Packages; [
+        immutabledict
+        ordered-set
+        typing-extensions
+      ];
+      doCheck = false;
+    })
     pkgs.python312Packages.pytest
     pkgs.python312Packages.lit
     pkgs.python312Packages.numpy
