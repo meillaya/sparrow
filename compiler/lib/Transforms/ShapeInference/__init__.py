@@ -86,10 +86,25 @@ def _make_tensor_type(shape: Sequence[Attribute], dtype) -> TensorType:
     return TensorType(coerced, dtype)
 
 
-def _gemm_out_shape(a_type: TensorType, b_type: TensorType) -> tuple[Attribute, ...]:
-    """``[A.shape[:-1], B.shape[-1]]`` (the dialect verifier already
-    confirmed ``A.shape[-1] == B.shape[-2]``)."""
-    return (*a_type.get_shape()[:-1], b_type.get_shape()[-1])
+def _gemm_out_shape(
+    a_type: TensorType,
+    b_type: TensorType,
+    *,
+    transpose_a: bool = False,
+    transpose_b: bool = False,
+) -> tuple[Attribute, ...]:
+    """Return the effective ``[A.shape[:-1], B.shape[-1]]`` shape.
+
+    Transpose flags swap the last two dims of each operand before the
+    shape rule is applied.
+    """
+    a_shape = a_type.get_shape()
+    b_shape = b_type.get_shape()
+    if transpose_a:
+        a_shape = (*a_shape[:-2], a_shape[-1], a_shape[-2])
+    if transpose_b:
+        b_shape = (*b_shape[:-2], b_shape[-1], b_shape[-2])
+    return (*a_shape[:-1], b_shape[-1])
 
 
 def _broadcast_op_shape(a_type: TensorType, b_type: TensorType) -> tuple[Attribute, ...] | None:
@@ -127,7 +142,12 @@ class ShapeInferencePattern(RewritePattern):
         if isinstance(op, GemmOp):
             a_t = _as_tensor_type(op.a.type)
             b_t = _as_tensor_type(op.b.type)
-            new_shape = _gemm_out_shape(a_t, b_t)
+            new_shape = _gemm_out_shape(
+                a_t,
+                b_t,
+                transpose_a=bool(op.transpose_a),
+                transpose_b=bool(op.transpose_b),
+            )
             new_type = _make_tensor_type(new_shape, a_t.get_dtype())
             self._maybe_replace(op.out, new_type, rewriter)
             return

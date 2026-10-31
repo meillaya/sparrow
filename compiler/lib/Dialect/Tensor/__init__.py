@@ -211,11 +211,15 @@ class GemmOp(IRDLOperation):
                 "forge.tensor.gemm requires operands with rank >= 2, got "
                 f"a.shape={a_shape}, b.shape={b_shape}"
             )
+        if bool(self.transpose_a):
+            a_shape = (*a_shape[:-2], a_shape[-1], a_shape[-2])
+        if bool(self.transpose_b):
+            b_shape = (*b_shape[:-2], b_shape[-1], b_shape[-2])
         if a_shape[-1] != b_shape[-2]:
             raise VerifyException(
                 "gemm inner dims mismatch: "
                 f"a.shape[-1]={a_shape[-1]} != b.shape[-2]={b_shape[-2]} "
-                f"(a.shape={a_shape}, b.shape={b_shape})"
+                f"(effective a.shape={a_shape}, b.shape={b_shape})"
             )
         expected_out_shape = (*a_shape[:-1], b_shape[-1])
         if out_shape != expected_out_shape:

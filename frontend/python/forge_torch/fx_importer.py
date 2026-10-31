@@ -48,7 +48,7 @@ if _compiler_root_str not in sys.path and (_compiler_root / "compiler").is_dir()
 
 from xdsl.builder import Builder, InsertPoint  # noqa: E402
 from xdsl.context import Context  # noqa: E402
-from xdsl.dialects.builtin import Builtin, ModuleOp  # noqa: E402
+from xdsl.dialects.builtin import BoolAttr, Builtin, ModuleOp  # noqa: E402
 from xdsl.dialects.func import FuncOp, ReturnOp  # noqa: E402
 from xdsl.ir import Block, Region, SSAValue  # noqa: E402
 from xdsl.printer import Printer  # noqa: E402
@@ -212,6 +212,8 @@ class FxImporter:
             return _infer_matmul_type(operand_types, forge_tensor)
         if target_name == "forge.graph.add":
             return _infer_add_type(operand_types, forge_tensor)
+        if target_name == "forge.graph.linear":
+            return _infer_linear_type(operand_types, forge_tensor)
         if target_name == "forge.graph.gelu":
             operand = _expect_tensor(operand_types[0], forge_tensor)
             return forge_tensor(list(_shape_seq(operand)), _dtype_str(operand))
@@ -259,6 +261,24 @@ class FxImporter:
         target_name = map_node_to_forge(node.target)
         operands = [ssa_values[n] for n in _data_arg_names(node)]
         result_type = self._result_type_for(node, operands)
+        if target_name == "forge.graph.linear":
+            tensor_mod = self._load_tensor_dialect()
+            gemm = tensor_mod.GemmOp.create(
+                operands=[operands[0], operands[1]],
+                result_types=[result_type],
+                properties={"transpose_b": BoolAttr.from_bool(True)},
+            )
+            builder.insert(gemm)
+            value = gemm.results[0]
+            if len(operands) == 3:
+                add = tensor_mod.BroadcastAddOp.create(
+                    operands=[value, operands[2]],
+                    result_types=[result_type],
+                )
+                builder.insert(add)
+                value = add.results[0]
+            ssa_values[node.name] = value
+            return
         op = _build_op(target_name, operands, result_type, node)
         builder.insert(op)
         ssa_values[node.name] = op.results[0]
@@ -273,6 +293,8 @@ class FxImporter:
             return _infer_matmul_type(_operand_types(operands, forge_tensor), forge_tensor)
         if target_name == "forge.graph.add":
             return _infer_add_type(_operand_types(operands, forge_tensor), forge_tensor)
+        if target_name == "forge.graph.linear":
+            return _infer_linear_type(_operand_types(operands, forge_tensor), forge_tensor)
         if target_name == "forge.graph.gelu":
             operand_type = _expect_tensor(operands[0].type, forge_tensor)
             return forge_tensor(list(_shape_seq(operand_type)), _dtype_str(operand_type))
@@ -537,6 +559,21 @@ def _infer_matmul_type(operand_types: list, forge_tensor):
         )
     out_shape = (*batch, shape_a[-2], shape_b[-1])
     return forge_tensor(list(out_shape), _dtype_str(a))
+
+
+def _infer_linear_type(operand_types: list, forge_tensor):
+    """``x @ weight.T + bias`` with weight shaped ``[out, in]``."""
+    x = _expect_tensor(operand_types[0], forge_tensor)
+    weight = _expect_tensor(operand_types[1], forge_tensor)
+    x_shape = list(_shape_seq(x))
+    w_shape = list(_shape_seq(weight))
+    if len(x_shape) < 1 or len(w_shape) != 2:
+        raise ValueError(f"linear needs x rank >= 1 and weight rank 2, got {x_shape}, {w_shape}")
+    if x_shape[-1] != w_shape[-1]:
+        raise ValueError(
+            f"linear input width {x_shape[-1]} does not match weight width {w_shape[-1]}"
+        )
+    return forge_tensor([*x_shape[:-1], w_shape[0]], _dtype_str(x))
 
 
 def _infer_add_type(operand_types: list, forge_tensor):

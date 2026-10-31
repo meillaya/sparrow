@@ -75,6 +75,7 @@ REPORT_PATH = Path(".cache/sparrow/reports/phase1-report.txt")
 _ATEN_TO_FORGE_TENSOR: Final[dict[str, str]] = {
     "aten.mm": "forge.tensor.gemm",
     "aten.matmul": "forge.tensor.gemm",
+    "aten.linear": "forge.tensor.gemm",
     "aten.add": "forge.tensor.broadcast_add",
     "aten.gelu": "forge.tensor.gelu",
     "aten.view": "forge.tensor.reshape",
@@ -226,6 +227,22 @@ def compile(
         plan_runtime=plan_runtime,
         planning_error=planning_error,
     )
+
+
+def compile_graph(
+    gm: torch.fx.GraphModule,
+    example_inputs: list[torch.Tensor],
+    *,
+    cache_store: CacheStore | None = None,
+    target: str = "triton",
+) -> CompiledFusedMLP:
+    """Compile an already-captured FX graph.
+
+    ``torch.compile`` backends receive this form, with parameters lifted
+    into graph placeholders by Dynamo. Re-tracing a GraphModule preserves
+    those placeholders, so the general compile path handles it.
+    """
+    return compile(gm, example_inputs, cache_store=cache_store, target=target)
 
 
 def compile_fused_mlp(

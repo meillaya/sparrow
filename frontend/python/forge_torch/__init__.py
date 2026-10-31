@@ -8,6 +8,7 @@ from forge_torch.backend import (
     CompiledGraph,
     compile,
     compile_fused_mlp,
+    compile_graph,
 )
 from forge_torch.cache import CacheKey, make_cache_key
 from forge_torch.cache_store import DEFAULT_CACHE_ROOT, CacheStore
@@ -25,6 +26,7 @@ __all__ = [
     "DynamicCompiledFusedMLP",
     "compile",
     "compile_fused_mlp",
+    "compile_graph",
     "dynamic_compile",
     "make_cache_key",
 ]

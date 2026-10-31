@@ -46,6 +46,7 @@ import torch
 SUPPORTED_ATEN_OPS: dict[str, str] = {
     "aten.mm": "forge.graph.matmul",
     "aten.matmul": "forge.graph.matmul",
+    "aten.linear": "forge.graph.linear",
     "aten.add": "forge.graph.add",
     "aten.gelu": "forge.graph.gelu",
     "aten.view": "forge.graph.view",

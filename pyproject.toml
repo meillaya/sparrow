@@ -43,6 +43,9 @@ test = [
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[project.entry-points."torch_dynamo_backends"]
+sparrow = "forge_torch.dynamo:backend"
+
 [tool.setuptools.packages.find]
 where = [".", "frontend/python"]
 include = ["compiler.lib*", "backends*", "forge_torch*"]
