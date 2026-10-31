@@ -517,7 +517,7 @@ Astra backend or general heterogeneous execution.
 
 The original audit ran without a CMake build, pytest, or ctest. The 0.2.0
 follow-up ran the full local gate on macOS with CMake 4.4, Ninja 1.13, xDSL
-0.74, PyTorch 2.15, gtest 1.18, and pybind11 3.1: 29 ctest cases, 30 lit tests,
-262 pytest cases (1 skipped for missing Triton), ruff, and ty all passed. The
+0.74, PyTorch 2.15, gtest 1.18, and pybind11 3.1: 37 ctest cases, 33 lit tests,
+274 pytest cases (1 skipped for missing Triton), ruff, and ty all passed. The
 compiler probe used xDSL 0.74, while the project allows 0.68 through 0.74. The
 Nix development shell and flake were not evaluated.
