@@ -81,10 +81,12 @@ eager.
 | Astra-sim | 64-bit microcode ISA, assembler, functional and timing simulators, provider | 16x16 tile; codegen is not usable |
 | MicroGPU-sim | 16-bit SIMT ISA, assembler, interpreter, provider | No lowering pass; one input |
 
-The partitioner registry is narrowed to ops with a dialect definition. Its
-lowering map is still empty, so `partition()` raises instead of assigning a
-region it cannot lower. General execution uses the MLIR plan builder and the CPU
-reference provider. The fused MLP keeps the native Triton-CPU kernel.
+The partitioner registry is narrowed to ops with a dialect definition. The
+compiler lowering map covers the CPU plan and the fused Triton group; Astra and
+MicroGPU lowerings are still empty, so `partition()` fails closed for them and
+`compile_partitioned` raises for configs B and C. Execution plans are version 3
+with a device table, and a plan can mix CPU nodes with a fused Triton node.
+The fused MLP keeps the native Triton-CPU kernel.
 
 ## Architecture
 

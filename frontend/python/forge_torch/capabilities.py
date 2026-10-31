@@ -34,6 +34,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
+from forge_torch.ops import CPU_ENTRY_POINTS
+
 
 @dataclass(frozen=True)
 class BackendCapabilities:
@@ -150,6 +152,23 @@ MICROGPU_CAPABILITIES: Final[BackendCapabilities] = BackendCapabilities(
 
 
 # ---------------------------------------------------------------------------
+# CPU reference — every op that has a plan entry point. This is the
+# lowering the compiler can actually emit today; the plan builder assigns
+# its nodes to this device by default.
+# ---------------------------------------------------------------------------
+
+CPU_CAPABILITIES: Final[BackendCapabilities] = BackendCapabilities(
+    name="cpu",
+    supported_ops=frozenset(CPU_ENTRY_POINTS),
+    supported_types=frozenset({"fp32"}),
+    local_memory_bytes=0,
+    supports_dynamic_shapes=False,
+    supports_async_execution=False,
+    supports_fused_epilogues=False,
+)
+
+
+# ---------------------------------------------------------------------------
 # Registry — single source of truth for ``compile(target=...)`` and the
 # partitioner. These sets describe what a backend can run, not what the
 # compiler can lower. The partitioner must also consult
@@ -158,6 +177,7 @@ MICROGPU_CAPABILITIES: Final[BackendCapabilities] = BackendCapabilities(
 # ---------------------------------------------------------------------------
 
 BACKEND_CAPABILITIES: Final[dict[str, BackendCapabilities]] = {
+    "cpu": CPU_CAPABILITIES,
     "triton": TRITON_CAPABILITIES,
     "astra": ASTRA_CAPABILITIES,
     "microgpu": MICROGPU_CAPABILITIES,
@@ -167,6 +187,7 @@ BACKEND_CAPABILITIES: Final[dict[str, BackendCapabilities]] = {
 __all__ = (
     "ASTRA_CAPABILITIES",
     "BACKEND_CAPABILITIES",
+    "CPU_CAPABILITIES",
     "MICROGPU_CAPABILITIES",
     "TRITON_CAPABILITIES",
     "BackendCapabilities",

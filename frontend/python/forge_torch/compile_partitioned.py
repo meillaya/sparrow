@@ -1,32 +1,22 @@
-"""Public entry point that wires compile + partition + dispatch for spec §19 Config A/B/C (Phase 7 Wave 4)."""
+"""Config-aware compile entry point: CPU plan for A, raise for B and C."""
 
 # frontend/python/forge_torch/compile_partitioned.py
 #
-# Heterogeneous compile entry point (Task 19, spec §6, plan §Todos).
+# Config-aware compile entry point (spec §6, §19).
 #
-# ``compile_partitioned(model, example_inputs, *, config)`` is the
-# Phase 7 public API mirror of :func:`forge_torch.backend.compile` —
-# same calling convention, but dispatches each FX region to its
-# configured backend (per spec §19 Config A / B / C) and threads
-# tensors between per-region compiled callables at call time.
+# ``compile_partitioned(model, example_inputs, *, config)`` captures the
+# FX graph, partitions it into regions, and assigns each region a backend.
+# Only config A is runnable today:
 #
-# Three configurations (CPU-only, per spec §19):
+#   * ``"A"`` — every region -> ``cpu``. The callable is the CPU execution
+#     plan, not the FX interpreter.
+#   * ``"B"`` — elementwise -> Triton, matmul -> Astra. Raises
+#     ``NotImplementedError`` until the Astra lowering exists.
+#   * ``"C"`` — elementwise -> Triton, matmul -> MicroGPU. Raises until the
+#     MicroGPU lowering exists.
 #
-#   * ``"A"`` — every region → Triton-CPU (single-backend fallback).
-#   * ``"B"`` — elementwise ops (gelu / layer_norm / softmax /
-#     broadcast_add) → Triton-CPU; matmul regions (forge.tensor.gemm) →
-#     Astra-sim. Mirrors spec §19 "elementwise on Triton, matmul on
-#     Astra".
-#   * ``"C"`` — elementwise → Triton-CPU; attention matmul → Triton-CPU;
-#     MLP matmul → MicroGPU-sim. Mirrors spec §19 "attention matmul
-#     Triton, MLP matmul MicroGPU" — the simplest version routes every
-#     matmul to MicroGPU; refinement (e.g. via region-index) is a
-#     later task.
-#
-# Region → backend assignment is data-driven from the FX graph the
-# partitioner captured; the assignment is also stored on the returned
-# :class:`CompiledModel` for downstream tooling (Phase 7 e2e tests,
-# metric table).
+# The region assignment stays data-driven from the canonical op table and
+# is stored on the returned :class:`CompiledModel` for tooling and metrics.
 
 from __future__ import annotations
 
@@ -87,7 +77,7 @@ def _assign_region_to_backend(region: list[Node], config: ValidConfig) -> str:
 
     The decision tree (CPU-only, spec §19):
 
-      * ``"A"`` — always ``"triton"``.
+      * ``"A"`` — always ``"cpu"``.
       * ``"B"`` — pure-matmul region → ``"astra"``; everything else →
         ``"triton"``.
       * ``"C"`` — matmul region → ``"microgpu"``; everything else →
@@ -97,7 +87,7 @@ def _assign_region_to_backend(region: list[Node], config: ValidConfig) -> str:
     (the superset target).
     """
     if config == "A":
-        return "triton"
+        return "cpu"
 
     op_names = {_extract_op_name(n) for n in region}
     op_names.discard(None)
@@ -128,28 +118,20 @@ def _assignments_from_config(regions: list[list[Node]], config: ValidConfig) -> 
 class CompiledModel:
     """Heterogeneously-compiled model.
 
-    Stores the captured FX graph, the regions produced by
-    :func:`forge_torch.region.partition_into_regions`, the per-region
-    backend assignment (data-driven from the user's ``config``), and
-    the per-region compiled callables produced by
-    :func:`forge_torch.backend.compile` with ``target=``.
+    Config A wraps the CPU execution-plan callable. The regions and
+    per-region assignments are retained for introspection and for the
+    spec §19 metrics table. Configs B and C are not constructed until the
+    Astra and MicroGPU lowerings exist; the public entry point raises for
+    them instead of pretending to compile.
 
-    :meth:`__call__` runs the captured FX graph through
-    ``torch.fx.Interpreter``. The per-region assignments and callables
-    are stored for inspection; they are planning labels, not lowered
-    artifacts. The object reports ``execution="fx-interpreter"`` and
-    ``planning_only=True`` so callers do not mistake it for a compiled
-    model.
+    :attr:`execution` is ``"cpu"`` when the plan built, and
+    :attr:`planning_only` mirrors whether execution still falls back to
+    eager.
     """
 
     #: Marker for downstream tooling (compiled region table, validation
     #: harness) — mirrors ``CompiledFusedMLP.compiled``.
     compiled: bool = True
-    #: This object is a planning result; it runs the FX graph, not
-    #: per-region kernels.
-    execution: str = "fx-interpreter"
-    lowered: bool = False
-    planning_only: bool = True
 
     def __init__(
         self,
@@ -159,6 +141,7 @@ class CompiledModel:
         assignments: list[str],
         region_compiled: list,
         gm: GraphModule,
+        compiled_callable=None,
     ) -> None:
         self.model = model
         self.example_inputs = example_inputs
@@ -166,6 +149,14 @@ class CompiledModel:
         self.region_assignments = list(assignments)
         self.region_compiled = list(region_compiled)
         self.gm = gm
+        self._compiled = compiled_callable
+        self.execution = (
+            getattr(compiled_callable, "execution", "eager")
+            if compiled_callable is not None
+            else "eager"
+        )
+        self.lowered = bool(getattr(compiled_callable, "lowered", False))
+        self.planning_only = not self.lowered
 
     # ------------------------------------------------------------------
     # Introspection helpers — used by the Phase 7 e2e tests and the
@@ -184,29 +175,18 @@ class CompiledModel:
         return self.region_assignments[region_idx]
 
     # ------------------------------------------------------------------
-    # Execution — run each region's callable in topological order with
-    # tensors threaded via the FX Interpreter. Phase 1's stub
-    # ``CompiledFusedMLP.__call__`` similarly delegates to eager, so the
-    # heterogeneous fan-out stays a single round-trip.
+    # Execution — dispatch to the CPU plan callable.
     # ------------------------------------------------------------------
 
     def __call__(self, *args: torch.Tensor) -> torch.Tensor:
-        # The per-region compiled callables (one per (region, backend)
-        # pair) are stored for introspection; the actual execution runs
-        # the captured FX graph through ``torch.fx.Interpreter`` which
-        # delegates to the underlying model's eager forward.
-        interp = torch.fx.Interpreter(self.gm)
-        out = interp.run(*args)
+        if self._compiled is None:  # pragma: no cover - constructor guard
+            raise RuntimeError("CompiledModel has no callable")
+        out = self._compiled(*args)
         if isinstance(out, tuple):
             if len(out) == 1:
                 return out[0]
-            return out  # pragma: no cover — Phase 7 models are single-output
+            return out  # pragma: no cover - Phase 7 models are single-output
         return out
-
-
-# ---------------------------------------------------------------------------
-# Public entry point.
-# ---------------------------------------------------------------------------
 
 
 def compile_partitioned(
@@ -215,64 +195,41 @@ def compile_partitioned(
     *,
     config: ValidConfig,
 ) -> CompiledModel:
-    """Compile ``model`` partitioned by ``config`` ("A" | "B" | "C").
+    """Compile ``model`` for ``config`` ("A" | "B" | "C").
 
-    Steps:
+    Config A is the runnable path: it builds the CPU execution plan and
+    returns a :class:`CompiledModel` whose callable runs that plan.
+    Configs B and C raise :class:`NotImplementedError` naming the
+    missing Astra / MicroGPU lowering; the region assignments remain
+    available for planning and metrics.
 
-    1. Capture the FX graph via ``torch.fx.symbolic_trace``.
-    2. Partition the graph into regions via
-       :func:`forge_torch.region.partition_into_regions`.
-    3. Compute per-region backend assignments from ``config``.
-    4. For each (region, backend) pair, dispatch
-       :func:`forge_torch.backend.compile` with ``target=backend`` to
-       produce a per-region compiled callable.
-    5. Return a :class:`CompiledModel` that runs the regions in
-       topological order at call time, threading tensors between them.
-
-    The model MUST be FX-traceable without ``get_attr`` nodes — pass
-    weights as ``forward()`` arguments (function-style) rather than as
-    ``nn.Parameter`` attributes. The shipped test fixtures use a
-    function-style model whose only ops are ``matmul``, ``add``,
-    ``gelu``, ``softmax``, ``layer_norm``, ``mm``, ``addmm``, ``relu``,
-    etc. — see ``test/test_compile_partitioned.py`` for examples.
+    The model must be FX-traceable. Parameters may be ordinary module
+    attributes; the importer lifts them into plan inputs.
     """
     if config not in {"A", "B", "C"}:
         raise ValueError(f"config must be one of 'A', 'B', 'C'; got {config!r}")
+    if config != "A":
+        backend = "Astra" if config == "B" else "MicroGPU"
+        raise NotImplementedError(
+            f"config {config!r} needs the {backend} lowering, which is not "
+            "available; config A (CPU) is the only runnable configuration"
+        )
 
     gm = torch.fx.symbolic_trace(model)
     regions = partition_into_regions(model, example_inputs)
     assignments = _assignments_from_config(regions, config)
-
-    # Phase 1's ``backend.compile()`` is a stub that delegates to eager
-    # (the lowered-execution path lands once ForgeRT Phase 5 is live).
-    # For each (region, backend) pair we call it with ``target=...`` so
-    # the per-region callables carry the assigned backend name in their
-    # diagnostic report; the call-time execution routes through the FX
-    # Interpreter which is target-agnostic.
-    #
-    # ``backend.compile`` emits a ``UserWarning`` per op the full model
-    # contains that the chosen target cannot run. The per-region callables
-    # are the whole model today, so the warnings are accurate: the
-    # assignment is a planning label, not a lowered artifact. Do not
-    # suppress them.
-    region_compiled = []
-    for backend in assignments:
-        compiled = backend_compile(model, example_inputs, target=backend)
-        region_compiled.append(compiled)
-
+    compiled = backend_compile(model, example_inputs, target="cpu")
+    if not compiled.lowered:
+        raise RuntimeError(
+            "config 'A' did not produce a CPU plan: "
+            f"{compiled.planning_error or 'unknown planning error'}"
+        )
     return CompiledModel(
         model=model,
         example_inputs=example_inputs,
         regions=regions,
         assignments=assignments,
-        region_compiled=region_compiled,
+        region_compiled=[compiled],
         gm=gm,
+        compiled_callable=compiled,
     )
-
-
-__all__ = (
-    "CompiledModel",
-    "ValidConfig",
-    "_classify_region_op",
-    "compile_partitioned",
-)

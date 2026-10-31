@@ -61,6 +61,25 @@ void from_json(const nlohmann::json& j, AllocationDefinition& a) {
 }
 
 // ---------------------------------------------------------------------------
+// DeviceDefinition
+// ---------------------------------------------------------------------------
+void to_json(nlohmann::json& j, const DeviceDefinition& d) {
+    j = nlohmann::json{
+        {"id",           d.id},
+        {"name",         d.name},
+        {"target",       static_cast<uint8_t>(d.target)},
+        {"memory_space", static_cast<uint8_t>(d.memory_space)},
+    };
+}
+
+void from_json(const nlohmann::json& j, DeviceDefinition& d) {
+    j.at("id").get_to(d.id);
+    j.at("name").get_to(d.name);
+    d.target = static_cast<TargetKind>(j.at("target").get<uint8_t>());
+    d.memory_space = static_cast<MemorySpace>(j.at("memory_space").get<uint8_t>());
+}
+
+// ---------------------------------------------------------------------------
 // ExecutableNode
 // ---------------------------------------------------------------------------
 void to_json(nlohmann::json& j, const ExecutableNode& n) {
@@ -123,6 +142,7 @@ void to_json(nlohmann::json& j, const ExecutionPlan& p) {
         {"version",     p.version},
         {"name",        p.name},
         {"artifacts",   p.artifacts},
+        {"devices",     p.devices},
         {"tensors",     p.tensors},
         {"allocations", p.allocations},
         {"nodes",       p.nodes},
@@ -138,6 +158,11 @@ void from_json(const nlohmann::json& j, ExecutionPlan& p) {
         j.at("artifacts").get_to(p.artifacts);
     } else {
         p.artifacts.clear();
+    }
+    if (j.contains("devices")) {
+        j.at("devices").get_to(p.devices);
+    } else {
+        p.devices.clear();
     }
     j.at("tensors").get_to(p.tensors);
     j.at("allocations").get_to(p.allocations);
@@ -167,8 +192,23 @@ Result<ExecutionPlan> parse_plan_json(const nlohmann::json& j) {
             return Error{"duplicate tensor id " + std::to_string(tensor.id), -28};
         }
     }
+    std::unordered_set<DeviceId> device_ids;
+    for (const DeviceDefinition& device : plan.devices) {
+        if (!device_ids.insert(device.id).second) {
+            return Error{"duplicate device id " + std::to_string(device.id), -28};
+        }
+    }
+    if (plan.version >= 3 && plan.devices.empty()) {
+        return Error{"version 3 plan has no device table", -28};
+    }
     std::unordered_set<NodeId> node_ids;
     for (const ExecutableNode& node : plan.nodes) {
+        if (plan.version >= 3 && !device_ids.contains(node.device)) {
+            return Error{"node " + std::to_string(node.id) +
+                             " references unknown device " +
+                             std::to_string(node.device),
+                         -22};
+        }
         if (!node_ids.insert(node.id).second) {
             return Error{"duplicate node id " + std::to_string(node.id), -28};
         }
@@ -192,6 +232,18 @@ Result<ExecutionPlan> parse_plan_json(const nlohmann::json& j) {
                                  " references unknown output tensor " +
                                  std::to_string(tid),
                              -28};
+            }
+        }
+    }
+    for (const ExecutableNode& node : plan.nodes) {
+        if (node.artifact >= plan.artifacts.size()) continue;
+        if (plan.version < 3) continue;
+        for (const DeviceDefinition& device : plan.devices) {
+            if (device.id != node.device) continue;
+            if (plan.artifacts[node.artifact].target != device.target) {
+                return Error{"node " + std::to_string(node.id) +
+                                 " artifact target does not match device target",
+                             -22};
             }
         }
     }

@@ -18,7 +18,9 @@ from backends.astra.sim.functional import (
 )
 from compiler.lib.Dialect.Astra.microcode import OpCode, decode
 
-_CYCLE_TABLE: Final[dict[OpCode, int]] = {
+#: Public per-instruction cycle table. The cost model imports this
+#: rather than duplicating the numbers.
+CYCLE_TABLE: Final[dict[OpCode, int]] = {
     OpCode.DMA_LOAD: 4,
     OpCode.DMA_STORE: 4,
     OpCode.MATMUL: 16,
@@ -26,6 +28,7 @@ _CYCLE_TABLE: Final[dict[OpCode, int]] = {
     OpCode.NOP: 1,
     OpCode.HALT: 1,
 }
+_CYCLE_TABLE = CYCLE_TABLE
 _FLOAT_BYTES: Final = 4
 
 

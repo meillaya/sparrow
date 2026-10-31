@@ -72,3 +72,63 @@ TEST(ExecutionPlanJsonRoundtrip, AllocationFields) {
         EXPECT_EQ(actual.memory_space, expected.memory_space);
     }
 }
+
+TEST(ExecutionPlanJsonRoundtrip, DeviceTable) {
+    forge_rt::ExecutionPlan plan;
+    plan.name = "devices";
+    plan.version = 3;
+    plan.devices = {
+        forge_rt::DeviceDefinition{0, "cpu", TargetKind::CPU, MemorySpace::Host},
+        forge_rt::DeviceDefinition{3, "triton", TargetKind::Triton, MemorySpace::Host},
+    };
+    ArtifactDescriptor artifact;
+    artifact.target = TargetKind::CPU;
+    plan.artifacts = {artifact};
+    plan.tensors = {{0, "x", DataType::Float32, {1}, MemorySpace::Host}};
+    forge_rt::ExecutableNode node;
+    node.artifact = 0;
+    plan.nodes = {node};
+    plan.inputs = {{0, "x"}};
+    plan.outputs = {{0, "x"}};
+
+    nlohmann::json json;
+    forge_rt::to_json(json, plan);
+    auto parsed = forge_rt::parse_plan_json(json);
+    ASSERT_TRUE(parsed.ok()) << parsed.error().message;
+    ASSERT_EQ(parsed.value().devices.size(), 2u);
+    EXPECT_EQ(parsed.value().devices[1].id, 3u);
+    EXPECT_EQ(parsed.value().devices[1].target, TargetKind::Triton);
+}
+
+TEST(ExecutionPlanJsonRoundtrip, Version3RequiresDevices) {
+    forge_rt::ExecutionPlan plan;
+    plan.name = "no_devices";
+    plan.version = 3;
+    plan.artifacts = {ArtifactDescriptor{}};
+    plan.tensors = {{0, "x", DataType::Float32, {1}, MemorySpace::Host}};
+    plan.inputs = {{0, "x"}};
+    plan.outputs = {{0, "x"}};
+
+    nlohmann::json json;
+    forge_rt::to_json(json, plan);
+    auto parsed = forge_rt::parse_plan_json(json);
+    ASSERT_FALSE(parsed.ok());
+    EXPECT_NE(parsed.error().message.find("device table"), std::string::npos);
+}
+
+TEST(ExecutionPlanJsonRoundtrip, Version2WithoutDevicesStillParses) {
+    forge_rt::ExecutionPlan plan;
+    plan.version = 2;
+    plan.name = "v2";
+    plan.artifacts = {ArtifactDescriptor{}};
+    plan.tensors = {{0, "x", DataType::Float32, {1}, MemorySpace::Host}};
+    plan.inputs = {{0, "x"}};
+    plan.outputs = {{0, "x"}};
+
+    nlohmann::json json;
+    forge_rt::to_json(json, plan);
+    json.erase("devices");
+    auto parsed = forge_rt::parse_plan_json(json);
+    ASSERT_TRUE(parsed.ok()) << parsed.error().message;
+    EXPECT_TRUE(parsed.value().devices.empty());
+}

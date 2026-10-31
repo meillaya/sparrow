@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import Final
 
 
 class OpCode(IntEnum):
@@ -55,6 +56,20 @@ class OpCode(IntEnum):
     MUL = 0x04
     SIGMOID = 0x05
     NOP = 0xFF
+
+
+#: Public per-instruction cycle counts consumed by the cost model.
+#: LOAD/STORE move one i32 word, arithmetic is one cycle, and SIGMOID
+#: is the reference transcendental lookup cost. RETURN terminates the
+#: warp and adds no cycles beyond the dispatch already counted.
+CYCLE_TABLE: Final[dict[OpCode, int]] = {
+    OpCode.LOAD_GLOBAL: 4,
+    OpCode.STORE_GLOBAL: 4,
+    OpCode.ADD: 1,
+    OpCode.MUL: 1,
+    OpCode.SIGMOID: 8,
+    OpCode.RETURN: 0,
+}
 
 
 @dataclass(frozen=True, slots=True)

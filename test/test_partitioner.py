@@ -297,13 +297,13 @@ def test_softmax_region_excludes_astra() -> None:
         [[softmax_node]], full_caps, estimate_cost, lowerings=_lowerings(full_caps)
     )
     chosen_backend_full = result_full[0][1]
-    assert chosen_backend_full in {"triton", "microgpu"}, (
+    assert chosen_backend_full in {"cpu", "triton", "microgpu"}, (
         f"unexpected backend chosen with full caps: {chosen_backend_full!r}"
     )
 
 
-def test_partitioner_fails_closed_without_a_lowering() -> None:
-    """The production lowering map is empty, so planning raises."""
+def test_partitioner_uses_the_cpu_lowering_by_default() -> None:
+    """The shipped lowering map covers gemm on CPU, so planning succeeds."""
 
     class _Matmul(nn.Module):
         def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
@@ -312,5 +312,20 @@ def test_partitioner_fails_closed_without_a_lowering() -> None:
     gm = torch.fx.symbolic_trace(_Matmul())
     matmul_node = _find_call_module(gm, op_name="matmul")
 
+    result = partition([[matmul_node]], dict(BACKEND_CAPABILITIES), estimate_cost)
+    assert result[0][1] == "cpu"
+
+
+def test_partitioner_fails_closed_when_no_lowering_covers_the_region() -> None:
+    """A capability without a compiler lowering is not a runnable candidate."""
+
+    class _Matmul(nn.Module):
+        def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+            return torch.matmul(x, w)
+
+    gm = torch.fx.symbolic_trace(_Matmul())
+    matmul_node = _find_call_module(gm, op_name="matmul")
+
+    caps = {"astra": ASTRA_CAPABILITIES}
     with pytest.raises(UnsupportedRegionError):
-        partition([[matmul_node]], dict(BACKEND_CAPABILITIES))
+        partition([[matmul_node]], caps, estimate_cost, lowerings={"astra": frozenset()})

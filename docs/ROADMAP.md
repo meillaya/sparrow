@@ -1,8 +1,8 @@
 # Sparrow roadmap
 
 The audit and [SPEC.md](SPEC.md) describe the contracts. This file tracks the
-remaining milestones from the completion plan. M1 through M3 are implemented;
-M4 through M7 are open.
+remaining milestones from the completion plan. M1 through M4 are implemented;
+M5 through M7 are open.
 
 ## Landed
 
@@ -42,20 +42,24 @@ M4 through M7 are open.
 - `models/transformer_block.py` uses ordinary `nn.Linear` / `nn.LayerNorm`
   parameters and runs through a CPU plan.
 
-## Open
-
 ### M4: devices, selection, and cost
 
-- Add a device table to plan version 3 and keep version 2 readable.
-- Validate node devices and provider targets in the scheduler.
-- Add a CPU capability and lowering entry, then select per op or per fused
-  group between CPU and Triton.
-- Derive cost tables from the kernels or simulators. Remove synthetic transfer
-  multipliers.
-- Make `compile_partitioned` build a plan for config A and raise for B and C
-  until those backends pass.
-- Acceptance: a mixed CPU and Triton plan executes, and an op with no lowering
-  raises a named error.
+- Plan version 3 carries a device table (`id`, `name`, `target`,
+  `memory_space`); version 2 plans still parse and use provider-index device
+  ids.
+- The scheduler resolves v3 nodes through the device table, rejects unknown
+  devices, mismatched artifact targets, and missing providers.
+- `CPU_CAPABILITIES` and `COMPILER_LOWERINGS["cpu"]` cover every plan entry
+  point. `build_plan(..., devices=..., fuse_triton=True)` collapses a
+  `gemm → broadcast_add → gelu` group into one Triton node, and the mixed plan
+  runs through the scheduler.
+- `_phase7_cycle_tables` derives Astra and MicroGPU cycle counts from the
+  simulator tables and shares the Triton/CPU kernel cost model. Synthetic
+  transfer multipliers are gone.
+- `compile_partitioned(config="A")` runs the CPU plan; B and C raise
+  `NotImplementedError` naming the missing lowering until those backends pass.
+
+## Open
 
 ### M5: Astra v2
 

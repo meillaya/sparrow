@@ -134,7 +134,7 @@ _DIALECT_TO_BACKEND_OP: Final[dict[str, dict[str, str | None]]] = {
         "microgpu": "add",
     },
     "forge.tensor.reshape": {
-        "triton": "matmul",
+        "triton": "gelu",  # one elementwise pass; no matmul shape contract
         "astra": None,
         "microgpu": None,
     },
@@ -160,6 +160,14 @@ _DIALECT_TO_BACKEND_OP: Final[dict[str, dict[str, str | None]]] = {
         "microgpu": None,  # composed — see _microgpu_cycles
     },
 }
+
+# CPU plan kernels are the same naive fp32 loops the Triton-CPU path uses,
+# so the derived cycle tables are shared. The ``cpu`` lowering is the one
+# the plan builder emits today; keeping its cost identical avoids a
+# synthetic "CPU is free" bias in the partitioner.
+for _dialect_op, _backend_ops in _DIALECT_TO_BACKEND_OP.items():
+    if "cpu" not in _backend_ops and "triton" in _backend_ops:
+        _backend_ops["cpu"] = _backend_ops["triton"]
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +281,7 @@ def estimate_cost(
         shape = item["shape"]
         backend_op = _DIALECT_TO_BACKEND_OP.get(dialect_op, {}).get(backend_name)
 
-        if backend_name == "triton":
+        if backend_name in {"triton", "cpu"}:
             if backend_op is not None:
                 compute += _triton_cycles(backend_op, shape)
         elif backend_name == "astra":

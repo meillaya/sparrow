@@ -124,22 +124,22 @@ def eager_output(
 
 
 # ---------------------------------------------------------------------------
-# Test 1 — Config A: every region → triton.
+# Config A is the only runnable configuration: it builds a CPU plan.
 # ---------------------------------------------------------------------------
 
 
-def test_config_a_runs_and_matches_eager(
+def test_config_a_builds_cpu_plan_and_matches_eager(
     simple_model: _SimpleLayeredModel,
     simple_inputs: list[torch.Tensor],
     eager_output: torch.Tensor,
 ) -> None:
-    """Config A (``"A"``): all regions route to Triton-CPU; output matches eager."""
+    """Config A (``"A"``) runs the CPU execution plan, not the FX interpreter."""
     compiled = compile_partitioned(simple_model, simple_inputs, config="A")
 
-    # Every region should route to triton in Config A.
-    assert set(compiled.region_assignments) == {"triton"}, (
-        f"Config A should route every region to triton; got {compiled.region_assignments!r}"
-    )
+    assert set(compiled.region_assignments) == {"cpu"}
+    assert compiled.execution == "cpu"
+    assert compiled.lowered is True
+    assert compiled.planning_only is False
 
     compiled_output = compiled(*simple_inputs)
     assert torch.allclose(compiled_output, eager_output, atol=1e-3), (
@@ -149,59 +149,14 @@ def test_config_a_runs_and_matches_eager(
 
 
 # ---------------------------------------------------------------------------
-# Test 2 — Config B: elementwise → triton; matmul regions → astra.
+# Configs B and C fail closed until their lowerings land.
 # ---------------------------------------------------------------------------
 
 
-def test_config_b_runs_and_matches_eager(
-    simple_model: _SimpleLayeredModel,
-    simple_inputs: list[torch.Tensor],
-    eager_output: torch.Tensor,
-) -> None:
-    """Config B (``"B"``): elementwise → triton, matmul regions → astra."""
-    compiled = compile_partitioned(simple_model, simple_inputs, config="B")
-
-    # Config B has at least one matmul region (3 in this model); the
-    # elementwise regions all route to triton. We don't pin the count
-    # of elementwise vs matmul regions (FX-version-dependent); just
-    # assert both kinds appear so Config B is non-trivial.
-    assert "astra" in compiled.backend_set, (
-        "Config B should assign at least one region to astra "
-        "(gemm regions are routed to astra per spec §19)."
-    )
-    assert "triton" in compiled.backend_set, (
-        "Config B should assign at least one region to triton (elementwise ops per spec §19)."
-    )
-
-    compiled_output = compiled(*simple_inputs)
-    assert torch.allclose(compiled_output, eager_output, atol=1e-3), (
-        f"Config B output diverges from eager: max abs diff = "
-        f"{(compiled_output - eager_output).abs().max().item():.3e}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Test 3 — Config C: elementwise → triton; matmul regions → microgpu.
-# ---------------------------------------------------------------------------
-
-
-def test_config_c_runs_and_matches_eager(
-    simple_model: _SimpleLayeredModel,
-    simple_inputs: list[torch.Tensor],
-    eager_output: torch.Tensor,
-) -> None:
-    """Config C (``"C"``): elementwise → triton, matmul regions → microgpu."""
-    compiled = compile_partitioned(simple_model, simple_inputs, config="C")
-
-    assert "microgpu" in compiled.backend_set, (
-        "Config C should assign at least one region to microgpu (matmul regions per spec §19)."
-    )
-    assert "triton" in compiled.backend_set, (
-        "Config C should assign at least one region to triton (elementwise ops per spec §19)."
-    )
-
-    compiled_output = compiled(*simple_inputs)
-    assert torch.allclose(compiled_output, eager_output, atol=1e-3), (
-        f"Config C output diverges from eager: max abs diff = "
-        f"{(compiled_output - eager_output).abs().max().item():.3e}"
-    )
+@pytest.mark.parametrize(
+    ("config", "backend"),
+    [("B", "Astra"), ("C", "MicroGPU")],
+)
+def test_unlowered_configs_raise(config: str, backend: str, simple_model, simple_inputs) -> None:
+    with pytest.raises(NotImplementedError, match=backend):
+        compile_partitioned(simple_model, simple_inputs, config=config)

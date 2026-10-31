@@ -26,6 +26,10 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import Final
 
+from backends.astra.sim.timing import CYCLE_TABLE as _ASTRA_CYCLE_TABLE
+from backends.microgpu.isa import CYCLE_TABLE as _MICROGPU_CYCLE_TABLE
+from backends.microgpu.isa import OpCode as _MicroOpCode
+from compiler.lib.Dialect.Astra.microcode import OpCode as _AstraOpCode
 from forge_torch.report import CompilationReport
 
 # ---------------------------------------------------------------------------
@@ -39,11 +43,15 @@ from forge_torch.report import CompilationReport
 # ---------------------------------------------------------------------------
 
 TRITON_CPU_CYCLES: Final[dict[str, Callable[[Sequence[int]], int]]] = {
-    "matmul": lambda shape: shape[0] * shape[1] * shape[2],  # M*N*K
-    "broadcast_add": lambda shape: shape[0] * shape[1],  # output M*N
-    "gelu": lambda shape: shape[0] * shape[1],  # elementwise
-    "layer_norm": lambda shape: shape[0] * shape[1],  # elementwise (mean+var+norm)
-    "softmax": lambda shape: shape[0] * shape[1],  # elementwise (exp+sum+div)
+    # ``fused_gemm_bias_gelu.cpp`` is a literal M/N/K loop nest; one
+    # multiply-add is one cycle and the bias+GELU epilogue runs once per
+    # output element.
+    "matmul": lambda shape: shape[0] * shape[1] * shape[2],
+    # Every elementwise kernel touches each output element exactly once.
+    "broadcast_add": lambda shape: shape[0] * shape[1],
+    "gelu": lambda shape: shape[0] * shape[1],
+    "layer_norm": lambda shape: shape[0] * shape[1],
+    "softmax": lambda shape: shape[0] * shape[1],
 }
 
 # ---------------------------------------------------------------------------
@@ -56,7 +64,7 @@ TRITON_CPU_CYCLES: Final[dict[str, Callable[[Sequence[int]], int]]] = {
 # raw M/N/K triple and returns the total cycles for the tile sweep.
 # ---------------------------------------------------------------------------
 
-_ASTRA_TILE_DIM: Final = 16
+_ASTRA_TILE_DIM: Final = 16  # matches ``backends/astra/sim/functional.TILE_DIM``
 
 
 def _astra_tiles(dim: int) -> int:
@@ -65,12 +73,15 @@ def _astra_tiles(dim: int) -> int:
 
 
 ASTRA_SIM_CYCLES: Final[dict[str, Callable[..., int]]] = {
-    "dma_load": lambda bytes_count: 4 * bytes_count,  # 4 cycles per byte
-    "dma_store": lambda bytes_count: 4 * bytes_count,  # 4 cycles per byte
+    "dma_load": lambda bytes_count: _ASTRA_CYCLE_TABLE[_AstraOpCode.DMA_LOAD] * bytes_count,
+    "dma_store": lambda bytes_count: _ASTRA_CYCLE_TABLE[_AstraOpCode.DMA_STORE] * bytes_count,
     "matmul": lambda shape: (
-        _astra_tiles(shape[0]) * _astra_tiles(shape[1]) * _astra_tiles(shape[2]) * 16
-    ),  # 16 cycles per 16x16 tile
-    "vector_gelu": lambda size: 4 * size,  # 4 cycles per element
+        _astra_tiles(shape[0])
+        * _astra_tiles(shape[1])
+        * _astra_tiles(shape[2])
+        * _ASTRA_CYCLE_TABLE[_AstraOpCode.MATMUL]
+    ),
+    "vector_gelu": lambda size: _ASTRA_CYCLE_TABLE[_AstraOpCode.VECTOR_GELU] * size,
 }
 
 # ---------------------------------------------------------------------------
@@ -84,12 +95,12 @@ ASTRA_SIM_CYCLES: Final[dict[str, Callable[..., int]]] = {
 # ---------------------------------------------------------------------------
 
 MICROGPU_SIM_CYCLES: Final[dict[str, int]] = {
-    "load_global": 4,
-    "store_global": 4,
-    "add": 1,
-    "mul": 1,
-    "sigmoid": 8,
-    "return": 0,
+    "load_global": _MICROGPU_CYCLE_TABLE[_MicroOpCode.LOAD_GLOBAL],
+    "store_global": _MICROGPU_CYCLE_TABLE[_MicroOpCode.STORE_GLOBAL],
+    "add": _MICROGPU_CYCLE_TABLE[_MicroOpCode.ADD],
+    "mul": _MICROGPU_CYCLE_TABLE[_MicroOpCode.MUL],
+    "sigmoid": _MICROGPU_CYCLE_TABLE[_MicroOpCode.SIGMOID],
+    "return": _MICROGPU_CYCLE_TABLE[_MicroOpCode.RETURN],
 }
 
 

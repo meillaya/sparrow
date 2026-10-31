@@ -4,10 +4,9 @@ The spec §19 demo requires a single comparison table that captures the
 6 metrics (``latency_us``, ``peak_memory_mb``, ``kernel_count``,
 ``data_transferred_mb``, ``compile_time_ms``, ``numerical_error_max``)
 for each of the three configurations (A / B / C) the heterogeneous
-partitioner dispatches. This module is a **planning estimate**: memory
-and transfer values come from shapes and per-backend multipliers, not
-from a lowered execution. ``Metrics.estimated`` says so, and
-``MetricsTable.render`` adds a footnote.
+partitioner dispatches. Config A executes a real CPU plan; configs B
+and C are absent because their lowerings do not exist. Memory values
+remain analytical estimates, and ``MetricsTable.render`` marks them.
 
 This module is the canonical source of those 6 fields. The five Phase
 7 e2e tests (Tasks 21-23 + the 4-case metrics-table test in Task 24)
@@ -27,12 +26,10 @@ Field provenance
   ``CompiledModel`` in the shipped scope).
 * ``kernel_count`` — ``len(compiled.regions)``; one region per
   per-op FX node after the adjacent-merge step.
-* ``data_transferred_mb`` — per-region byte accounting with
-  backend-specific transfer multipliers: triton in-process (0x),
-  astra DMA (2x input + output bytes per matmul region), microgpu
-  LOAD/STORE (2x per matmul region). The multiplier is the spec §19
-  "DMA transfers" signal — Config B (matmul → astra) is therefore
-  strictly larger than Config A (all → triton, in-process).
+* ``data_transferred_mb`` — bytes moved across a device boundary. The
+  only runnable configuration is CPU-only, so this is 0.0. Synthetic
+  transfer multipliers are gone; a backend that actually crosses a
+  device boundary must report its measured bytes.
 * ``compile_time_ms`` — wall-clock for the
   ``compile_partitioned(model, inputs, config=config)`` call.
 * ``numerical_error_max`` — ``max(|compiled(*inputs) -
@@ -46,7 +43,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 import torch
@@ -56,18 +53,6 @@ from forge_torch.compile_partitioned import (
     ValidConfig,
     compile_partitioned,
 )
-
-# Backend-specific transfer multipliers (spec §19 "data transferred").
-#   * triton — in-process kernel launch; no host<->device transfer.
-#   * astra  — Phase 4 microcode DMA: every matmul region issues
-#              DMA_LOAD + DMA_STORE, so 2x the tensor byte count.
-#   * microgpu — Phase 8 SIMT interpreter: LOAD_GLOBAL + STORE_GLOBAL
-#              per matmul region, same 2x accounting as astra.
-_TRANSFER_MULTIPLIER: Final[dict[str, float]] = {
-    "triton": 0.0,
-    "astra": 2.0,
-    "microgpu": 2.0,
-}
 
 # Regions whose op set is purely ``forge.tensor.gemm`` route to
 # astra / microgpu in Config B / C; the other regions stay on triton
@@ -126,64 +111,45 @@ class MetricsTable:
     """
 
     config_a: Metrics
-    config_b: Metrics
-    config_c: Metrics
+    config_b: Metrics | None = None
+    config_c: Metrics | None = None
+    notes: dict[str, str] = field(default_factory=dict)
 
     def render(self) -> str:
-        """Render the spec §19 comparison table as a markdown string."""
+        """Render the spec §19 comparison table as a markdown string.
+
+        Configs whose backend lowering is unavailable render ``n/a`` and
+        the reason is appended as a footnote. Config A is always present.
+        """
         rows = [
-            (
-                "latency_us",
-                self.config_a.latency_us,
-                self.config_b.latency_us,
-                self.config_c.latency_us,
-            ),
-            (
-                "peak_memory_mb",
-                self.config_a.peak_memory_mb,
-                self.config_b.peak_memory_mb,
-                self.config_c.peak_memory_mb,
-            ),
-            (
-                "kernel_count",
-                self.config_a.kernel_count,
-                self.config_b.kernel_count,
-                self.config_c.kernel_count,
-            ),
-            (
-                "data_transferred_mb",
-                self.config_a.data_transferred_mb,
-                self.config_b.data_transferred_mb,
-                self.config_c.data_transferred_mb,
-            ),
-            (
-                "compile_time_ms",
-                self.config_a.compile_time_ms,
-                self.config_b.compile_time_ms,
-                self.config_c.compile_time_ms,
-            ),
-            (
-                "numerical_error_max",
-                self.config_a.numerical_error_max,
-                self.config_b.numerical_error_max,
-                self.config_c.numerical_error_max,
-            ),
+            ("latency_us", "latency_us"),
+            ("peak_memory_mb", "peak_memory_mb"),
+            ("kernel_count", "kernel_count"),
+            ("data_transferred_mb", "data_transferred_mb"),
+            ("compile_time_ms", "compile_time_ms"),
+            ("numerical_error_max", "numerical_error_max"),
         ]
-        # Transposed layout: 4 rows (Metric / Config A / Config B /
-        # Config C) x 7 columns (row label + 6 metric values). Each
-        # column is a metric; each row is a view (header + 3 configs).
-        header = "| Metric   | " + " | ".join(name for name, *_ in rows) + " |"
+        header = "| Metric   | " + " | ".join(name for name, _ in rows) + " |"
         separator = "|" + "|".join(["---"] * (len(rows) + 1)) + "|"
-        body_lines = [
-            "| Config A | " + " | ".join(_format(a) for _, a, _, _ in rows) + " |",
-            "| Config B | " + " | ".join(_format(b) for _, _, b, _ in rows) + " |",
-            "| Config C | " + " | ".join(_format(c) for _, _, _, c in rows) + " |",
-        ]
-        note = (
-            "\nEstimated fields: peak_memory_mb, data_transferred_mb. "
-            "No lowered execution produced these values.\n"
+        lines = [header, separator]
+        for label, metrics in (
+            ("Config A", self.config_a),
+            ("Config B", self.config_b),
+            ("Config C", self.config_c),
+        ):
+            cells = [
+                _format(getattr(metrics, field)) if metrics is not None else "n/a"
+                for _, field in rows
+            ]
+            lines.append(f"| {label} | " + " | ".join(cells) + " |")
+        lines.append("")
+        lines.append(
+            "Estimated fields: peak_memory_mb, data_transferred_mb. "
+            "Config A executes the CPU plan; B and C are not lowered."
         )
-        return "\n".join([header, separator, *body_lines]) + "\n" + note
+        for config, reason in sorted(self.notes.items()):
+            lines.append(f"{config}: {reason}")
+        return "\n".join(lines) + "\n"
 
 
 def _format(value: float) -> str:
@@ -213,37 +179,6 @@ def _region_input_bytes(compiled: CompiledModel) -> int:
         return 0
     sample = compiled.example_inputs[0]
     return sample.numel() * sample.element_size()
-
-
-def _is_pure_matmul_region(region: list) -> bool:
-    """``True`` if every mapped op in ``region`` is a matmul op."""
-    from forge_torch.partitioner import map_node_to_forge_op
-
-    op_names: set[str] = set()
-    for node in region:
-        mapped = map_node_to_forge_op(node)
-        if mapped is not None:
-            op_names.add(mapped)
-    return bool(op_names) and op_names <= _MATMUL_OPS
-
-
-def _per_config_transfer_mb(
-    compiled: CompiledModel,
-    per_region_bytes: int,
-) -> float:
-    """Sum the per-region data-transferred bytes for ``compiled``."""
-    total_bytes = 0
-    for region, backend in zip(compiled.regions, compiled.region_assignments, strict=True):
-        multiplier = _TRANSFER_MULTIPLIER.get(backend, 0.0)
-        if multiplier == 0.0:
-            continue
-        # Only matmul regions incur DMA / LOAD / STORE on the shipped
-        # backends; elementwise regions reuse the in-flight tensor
-        # without host↔device movement.
-        if not _is_pure_matmul_region(region):
-            continue
-        total_bytes += int(multiplier * per_region_bytes)
-    return total_bytes / (1024 * 1024)
 
 
 def _peak_memory_mb(compiled: CompiledModel, per_region_bytes: int) -> float:
@@ -279,7 +214,10 @@ def metrics_table(
 
     numerical_error_max = float((compiled_output - eager_output).abs().max().item())
     per_region_bytes = _region_input_bytes(compiled)
-    data_transferred_mb = _per_config_transfer_mb(compiled, per_region_bytes)
+    # The CPU plan runs in-process; nothing crosses a device boundary, so
+    # the measured transfer count is zero. Backends that do move bytes
+    # must report their own measurement rather than a multiplier.
+    data_transferred_mb = 0.0
     peak_memory_mb = _peak_memory_mb(compiled, per_region_bytes)
 
     return Metrics(
@@ -297,11 +235,19 @@ def build_metrics_table(
     model: torch.nn.Module,
     inputs: list[torch.Tensor],
 ) -> MetricsTable:
-    """Run all three configs (A / B / C) and return the comparison table."""
+    """Run every available config and record why the others are missing."""
+    rows: dict[str, Metrics] = {}
+    notes: dict[str, str] = {}
+    for config in ("A", "B", "C"):
+        try:
+            rows[config] = metrics_table(model, inputs, config)
+        except NotImplementedError as exc:
+            notes[config] = str(exc)
     return MetricsTable(
-        config_a=metrics_table(model, inputs, "A"),
-        config_b=metrics_table(model, inputs, "B"),
-        config_c=metrics_table(model, inputs, "C"),
+        config_a=rows["A"],
+        config_b=rows.get("B"),
+        config_c=rows.get("C"),
+        notes=notes,
     )
 
 

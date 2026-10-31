@@ -29,6 +29,7 @@ using forge_rt::ArtifactDescriptor;
 using forge_rt::Buffer;
 using forge_rt::BufferSpec;
 using forge_rt::DataType;
+using forge_rt::DeviceDefinition;
 using forge_rt::Error;
 using forge_rt::Event;
 using forge_rt::ExecutionPlan;
@@ -158,6 +159,7 @@ private:
 // ===========================================================================
 TEST(ExecutionPlan_json_roundtrip, PlanSurvivesFieldByField) {
     ExecutionPlan p;
+    p.version = 2;
     p.name = "fused_mlp_phase1";
     p.artifacts = MakeArtifacts(8);
 
@@ -252,6 +254,7 @@ TEST(Scheduler_linear, TwoNodeChainFiresInTopologicalOrder) {
     // Tensor 0 = external x, tensor 1 = intermediate, tensor 2 = external y.
     // node 0 reads 0 and writes 1; node 1 reads 1 and writes 2.
     ExecutionPlan p;
+    p.version = 2;
     p.name = "linear";
     p.artifacts = MakeArtifacts(8);
     p.tensors = {
@@ -289,6 +292,7 @@ TEST(Scheduler_linear, TwoNodeChainFiresInTopologicalOrder) {
 TEST(Scheduler_diamond, TopologicalInvariantsOnDiamondDAG) {
     // 5 tensors: x (input), a (out of 0), b (out of 1), c (out of 2), y (out of 3).
     ExecutionPlan p;
+    p.version = 2;
     p.name = "diamond";
     p.artifacts = MakeArtifacts(8);
     p.tensors = {
@@ -349,6 +353,7 @@ TEST(Scheduler_diamond, TopologicalInvariantsOnDiamondDAG) {
 TEST(Scheduler_cycle, ReturnsErrorAndSkipsLaunchOnCyclicPlan) {
     // 2 nodes depending on each other.
     ExecutionPlan p;
+    p.version = 2;
     p.name = "cycle";
     p.artifacts = MakeArtifacts(8);
     p.tensors = {
@@ -387,6 +392,7 @@ TEST(Scheduler_cycle, ReturnsErrorAndSkipsLaunchOnCyclicPlan) {
 
 TEST(Scheduler, UsesMemoryPlannerAllocations) {
     ExecutionPlan plan;
+    plan.version = 2;  // provider-index compatibility path
     plan.name = "fused_mlp_offsets";
     plan.artifacts = MakeArtifacts(8);
     plan.tensors = {
@@ -434,6 +440,7 @@ TEST(Scheduler, UsesMemoryPlannerAllocations) {
 // ===========================================================================
 TEST(Scheduler_sparse_ids, LargeNodeIdsRunInDependencyOrder) {
     ExecutionPlan plan;
+    plan.version = 2;  // provider-index compatibility path
     plan.name = "sparse_ids";
     plan.artifacts = MakeArtifacts(21);
     plan.tensors = {
@@ -468,6 +475,7 @@ TEST(Scheduler_sparse_ids, LargeNodeIdsRunInDependencyOrder) {
 // ===========================================================================
 TEST(Scheduler_artifacts, MissingArtifactIsRejected) {
     ExecutionPlan plan;
+    plan.version = 2;  // provider-index compatibility path
     plan.name = "missing_artifact";
     plan.tensors = {MakeTensor(0, "x", {4}), MakeTensor(1, "y", {4})};
     plan.nodes = {MakeNode(0, {0}, {1}, {})};
@@ -490,6 +498,7 @@ TEST(Scheduler_artifacts, MissingArtifactIsRejected) {
 // ===========================================================================
 TEST(Scheduler_capacity, UndersizedOutputIsRejected) {
     ExecutionPlan plan;
+    plan.version = 2;  // provider-index compatibility path
     plan.name = "undersized";
     plan.artifacts = MakeArtifacts(2);
     plan.tensors = {MakeTensor(0, "x", {4}), MakeTensor(1, "y", {4})};
@@ -545,6 +554,7 @@ public:
 
 TEST(Scheduler_in_place, OutputAliasKeepsCallerStorage) {
     ExecutionPlan plan;
+    plan.version = 2;  // provider-index compatibility path
     plan.name = "in_place";
     plan.artifacts = MakeArtifacts(1);
     plan.tensors = {MakeTensor(0, "x", {1})};
@@ -587,6 +597,7 @@ public:
 
 TEST(Scheduler_failure, FailedLaunchPreservesCallerBuffers) {
     ExecutionPlan plan;
+    plan.version = 2;  // provider-index compatibility path
     plan.name = "failing_launch";
     plan.artifacts = MakeArtifacts(2);
     plan.tensors = {MakeTensor(0, "x", {1}), MakeTensor(1, "y", {1})};
@@ -617,4 +628,114 @@ TEST(Scheduler_failure, FailedLaunchPreservesCallerBuffers) {
     EXPECT_EQ(outputs[0].data(), output_storage.data());
     EXPECT_EQ(inputs[0].spec().byte_size, 4u);
     EXPECT_EQ(outputs[0].spec().byte_size, 4u);
+}
+
+// ---------------------------------------------------------------------------
+// Version 3 device table.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+ExecutionPlan MakeDevicePlan() {
+    ExecutionPlan plan;
+    plan.name = "device_table";
+    plan.version = 3;
+    plan.devices = {
+        DeviceDefinition{0, "cpu", TargetKind::CPU, MemorySpace::Host},
+        DeviceDefinition{1, "triton", TargetKind::Triton, MemorySpace::Host},
+    };
+    plan.artifacts = MakeArtifacts(2);
+    plan.artifacts[1].target = TargetKind::Triton;
+    plan.tensors = {MakeTensor(0, "x", {1}), MakeTensor(1, "y", {1}),
+                    MakeTensor(2, "z", {1})};
+    plan.nodes = {
+        ExecutableNode{0, 0, 0, {0}, {1}, {}, DefaultLaunch()},
+        ExecutableNode{1, 1, 1, {1}, {2}, {0}, DefaultLaunch()},
+    };
+    plan.inputs = {{0, "x"}};
+    plan.outputs = {{2, "z"}};
+    return plan;
+}
+
+std::vector<Buffer> OneBuffer(std::vector<float>& storage) {
+    BufferSpec spec;
+    spec.descriptor.dtype = DataType::Float32;
+    spec.descriptor.shape = {1};
+    spec.byte_size = 4;
+    spec.alignment = 4;
+    std::vector<Buffer> buffers;
+    buffers.emplace_back(storage.data(), spec, false);
+    return buffers;
+}
+
+}  // namespace
+
+TEST(Scheduler_devices, DispatchesThroughDeviceTableTargets) {
+    ExecutionPlan plan = MakeDevicePlan();
+    auto cpu = std::make_shared<MockDeviceProvider>(MemorySpace::Host, TargetKind::CPU);
+    auto triton = std::make_shared<MockDeviceProvider>(MemorySpace::Host, TargetKind::Triton);
+    Scheduler scheduler({cpu, triton});
+
+    std::vector<float> input_storage = {1.0F};
+    std::vector<float> output_storage = {0.0F};
+    auto inputs = OneBuffer(input_storage);
+    auto outputs = OneBuffer(output_storage);
+    auto result = scheduler.execute(plan, inputs, outputs);
+
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    const std::vector<std::string> cpu_launches = launch_entries(cpu->call_log());
+    const std::vector<std::string> triton_launches = launch_entries(triton->call_log());
+    ASSERT_EQ(cpu_launches.size(), 1u);
+    ASSERT_EQ(triton_launches.size(), 1u);
+    EXPECT_EQ(cpu_launches[0], "launch node 0");
+    EXPECT_EQ(triton_launches[0], "launch node 1");
+}
+
+TEST(Scheduler_devices, UnknownDeviceIsRejected) {
+    ExecutionPlan plan = MakeDevicePlan();
+    plan.nodes[0].device = 9;
+    auto provider = std::make_shared<MockDeviceProvider>();
+    Scheduler scheduler({provider});
+    std::vector<float> input_storage = {1.0F};
+    std::vector<float> output_storage = {0.0F};
+    auto inputs = OneBuffer(input_storage);
+    auto outputs = OneBuffer(output_storage);
+
+    auto result = scheduler.execute(plan, inputs, outputs);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.error().code, -22);
+    EXPECT_NE(result.error().message.find("unknown device"), std::string::npos);
+}
+
+TEST(Scheduler_devices, ArtifactTargetMustMatchDeviceTarget) {
+    ExecutionPlan plan = MakeDevicePlan();
+    plan.artifacts[0].target = TargetKind::Triton;
+    auto provider = std::make_shared<MockDeviceProvider>();
+    Scheduler scheduler({provider});
+    std::vector<float> input_storage = {1.0F};
+    std::vector<float> output_storage = {0.0F};
+    auto inputs = OneBuffer(input_storage);
+    auto outputs = OneBuffer(output_storage);
+
+    auto result = scheduler.execute(plan, inputs, outputs);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.error().code, -22);
+    EXPECT_NE(result.error().message.find("device"), std::string::npos);
+}
+
+TEST(Scheduler_devices, MissingProviderForDeviceTargetIsRejected) {
+    ExecutionPlan plan = MakeDevicePlan();
+    plan.devices[1].target = TargetKind::Astra;
+    plan.artifacts[1].target = TargetKind::Astra;
+    auto provider = std::make_shared<MockDeviceProvider>(MemorySpace::Host, TargetKind::CPU);
+    Scheduler scheduler({provider});
+    std::vector<float> input_storage = {1.0F};
+    std::vector<float> output_storage = {0.0F};
+    auto inputs = OneBuffer(input_storage);
+    auto outputs = OneBuffer(output_storage);
+
+    auto result = scheduler.execute(plan, inputs, outputs);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.error().code, -22);
+    EXPECT_NE(result.error().message.find("provider"), std::string::npos);
 }

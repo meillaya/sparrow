@@ -174,6 +174,12 @@ Result<std::vector<Event>> Scheduler::execute(ExecutionPlan& plan,
     }
     const std::vector<NodeId>& order = order_result.value();
 
+    std::unordered_map<DeviceId, const DeviceDefinition*> device_table;
+    device_table.reserve(plan.devices.size() * 2 + 1);
+    for (const DeviceDefinition& device : plan.devices) {
+        device_table.emplace(device.id, &device);
+    }
+
     const auto planning_result = MemoryPlanner::plan(plan, order);
     if (!planning_result.ok()) {
         return error("memory planning failed: " + planning_result.error().message, -10);
@@ -280,13 +286,45 @@ Result<std::vector<Event>> Scheduler::execute(ExecutionPlan& plan,
 
     for (const NodeId node_id : order) {
         const ExecutableNode& node = plan.nodes[node_index[node_id]];
-        if (node.device >= providers_.size()) {
-            return error("node " + std::to_string(node.id) + " references device " +
-                             std::to_string(node.device) + " but only " +
-                             std::to_string(providers_.size()) + " providers are registered",
-                         -22);
+        std::shared_ptr<DeviceProvider> provider;
+        if (plan.version >= 3) {
+            const auto device_it = device_table.find(node.device);
+            if (device_it == device_table.end()) {
+                return error("node " + std::to_string(node.id) +
+                                 " references unknown device " +
+                                 std::to_string(node.device),
+                             -22);
+            }
+            const DeviceDefinition& device = *device_it->second;
+            if (plan.artifacts[node.artifact].target != device.target) {
+                return error("node " + std::to_string(node.id) +
+                                 " artifact target does not match device " +
+                                 std::to_string(device.id) + " target",
+                             -22);
+            }
+            for (const std::shared_ptr<DeviceProvider>& candidate : providers_) {
+                if (candidate->target() == device.target) {
+                    provider = candidate;
+                    break;
+                }
+            }
+            if (!provider) {
+                return error("node " + std::to_string(node.id) +
+                                 " needs a provider for device target " +
+                                 std::to_string(static_cast<int>(device.target)) +
+                                 " but none is registered",
+                             -22);
+            }
+        } else {
+            if (node.device >= providers_.size()) {
+                return error("node " + std::to_string(node.id) + " references device " +
+                                 std::to_string(node.device) + " but only " +
+                                 std::to_string(providers_.size()) +
+                                 " providers are registered",
+                             -22);
+            }
+            provider = providers_[node.device];
         }
-        const std::shared_ptr<DeviceProvider>& provider = providers_[node.device];
 
         ArtifactDescriptor artifact = plan.artifacts[node.artifact];
         artifact.launch = node.launch;

@@ -74,6 +74,8 @@ py::array_t<float> run_fused_mlp(py::array_t<float, py::array::c_style | py::arr
 
     ExecutionPlan plan;
     plan.name = "fused_mlp_native";
+    plan.version = 3;
+    plan.devices = {DeviceDefinition{0, "triton", TargetKind::Triton, MemorySpace::Host}};
     ArtifactDescriptor artifact;
     artifact.target = TargetKind::Triton;
     artifact.entry_point = "fused_gemm_bias_gelu";
@@ -161,9 +163,10 @@ py::list execute_plan(const std::string& plan_json, py::list inputs) {
         throw py::value_error("execute_plan: input count does not match the plan");
     }
     for (const ArtifactDescriptor& artifact : plan.artifacts) {
-        if (artifact.target != TargetKind::CPU) {
+        if (artifact.target != TargetKind::CPU &&
+            artifact.target != TargetKind::Triton) {
             throw py::value_error(
-                "execute_plan: only CPU artifacts are supported by this binding");
+                "execute_plan: only CPU and Triton artifacts are supported by this binding");
         }
     }
 
@@ -207,8 +210,9 @@ py::list execute_plan(const std::string& plan_json, py::list inputs) {
                                     spec_for(tensor, elements), /*owns=*/false);
     }
 
-    auto provider = std::make_shared<providers::CpuProvider>();
-    Scheduler scheduler({provider});
+    auto cpu_provider = std::make_shared<providers::CpuProvider>();
+    auto triton_provider = std::make_shared<providers::TritonProvider>();
+    Scheduler scheduler({cpu_provider, triton_provider});
     auto result = scheduler.execute(plan, input_buffers, output_buffers);
     if (!result.ok()) {
         throw std::runtime_error("execute_plan: " + result.error().message);
@@ -229,6 +233,6 @@ PYBIND11_MODULE(_sparrow_rt, module) {
                "Run the fp32 fused MLP kernel through ForgeRT",
                py::arg("x"), py::arg("w"), py::arg("b"));
     module.def("execute_plan", &execute_plan,
-               "Execute a version 2 CPU plan with the given input arrays",
+               "Execute a version 2/3 CPU or mixed CPU/Triton plan",
                py::arg("plan_json"), py::arg("inputs"));
 }

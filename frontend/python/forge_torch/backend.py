@@ -177,11 +177,11 @@ def compile(
     mlir_text = str(module)
     lifted_inputs = tuple(importer.lifted_tensors)
 
-    native_runner = _native_runner_for(gm, example_inputs)
+    native_runner = _native_runner_for(gm, example_inputs) if target == "triton" else None
     built_plan: BuiltPlan | None = None
     plan_runtime = None
     planning_error: str | None = None
-    if native_runner is None and target == "triton":
+    if native_runner is None and target in {"triton", "cpu"}:
         built_plan, plan_runtime, planning_error = _build_cpu_plan(module)
 
     if native_runner is not None:

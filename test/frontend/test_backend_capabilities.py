@@ -25,6 +25,7 @@ from __future__ import annotations
 from forge_torch.capabilities import (
     ASTRA_CAPABILITIES,
     BACKEND_CAPABILITIES,
+    CPU_CAPABILITIES,
     MICROGPU_CAPABILITIES,
     TRITON_CAPABILITIES,
 )
@@ -87,19 +88,27 @@ def test_registry_lookup_by_name() -> None:
     here + one assertion below; the registry is intentionally exhaustive
     over the three shipped backends.
     """
+    assert BACKEND_CAPABILITIES["cpu"] is CPU_CAPABILITIES
     assert BACKEND_CAPABILITIES["triton"] is TRITON_CAPABILITIES
     assert BACKEND_CAPABILITIES["astra"] is ASTRA_CAPABILITIES
     assert BACKEND_CAPABILITIES["microgpu"] is MICROGPU_CAPABILITIES
-    assert set(BACKEND_CAPABILITIES) == {"triton", "astra", "microgpu"}
+    assert set(BACKEND_CAPABILITIES) == {"cpu", "triton", "astra", "microgpu"}
 
 
 def test_compiler_lowerings_are_explicit() -> None:
-    """The compiler lowering map exists and starts empty.
-
-    Empty means the partitioner fails closed until a region codegen
-    lands. It must not silently fall back to Triton.
-    """
+    """CPU and the fused Triton group lower; Astra and MicroGPU fail closed."""
     from forge_torch.lowerings import COMPILER_LOWERINGS
+    from forge_torch.ops import CPU_ENTRY_POINTS
 
-    assert set(COMPILER_LOWERINGS) == {"triton", "astra", "microgpu"}
-    assert all(ops == frozenset() for ops in COMPILER_LOWERINGS.values())
+    assert set(COMPILER_LOWERINGS) == {"cpu", "triton", "astra", "microgpu"}
+    assert COMPILER_LOWERINGS["cpu"] == frozenset(CPU_ENTRY_POINTS)
+    assert COMPILER_LOWERINGS["triton"] == frozenset({"forge.tensor.fused_epilogue"})
+    assert COMPILER_LOWERINGS["astra"] == frozenset()
+    assert COMPILER_LOWERINGS["microgpu"] == frozenset()
+
+
+def test_cpu_capabilities_cover_every_entry_point() -> None:
+    from forge_torch.ops import CPU_ENTRY_POINTS
+
+    assert CPU_CAPABILITIES.supported_ops == frozenset(CPU_ENTRY_POINTS)
+    assert CPU_CAPABILITIES.supported_types == frozenset({"fp32"})

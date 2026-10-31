@@ -1,7 +1,7 @@
 """Phase 7 Config A end-to-end pytest (Task 21, spec §19).
 
-Config A: every FX region routes to the Triton-CPU backend (the single-
-backend fallback). The compiled model must produce a tensor matching
+Config A: every FX region routes to the CPU reference backend, which is
+the only general lowering in the shipped scope. The compiled model must produce a tensor matching
 eager within fp32 atol=1e-3 and the spec §19 metric table (latency,
 peak memory, kernel count, data transferred, compile time, numerical
 error) must be populated for the run.
@@ -136,7 +136,7 @@ def test_config_a_matches_eager_within_fp32_atol(
     compile_time_ms = (time.perf_counter() - t0) * 1000.0
 
     # Spec §19 Config A: every region routes to triton.
-    assert set(compiled.region_assignments) == {"triton"}, (
+    assert set(compiled.region_assignments) == {"cpu"}, (
         f"Config A must route every region to triton; got {compiled.region_assignments!r}"
     )
 

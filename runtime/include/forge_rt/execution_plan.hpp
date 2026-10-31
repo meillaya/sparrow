@@ -56,6 +56,17 @@ struct AllocationDefinition {
     MemorySpace memory_space = MemorySpace::Host;
 };
 
+// One device slot in a version 3 plan. Nodes reference the id, and the
+// scheduler resolves it to a registered provider by target. Version 2
+// plans have no device table; their `ExecutableNode::device` is a
+// provider index.
+struct DeviceDefinition {
+    DeviceId id = 0;
+    std::string name;
+    TargetKind target = TargetKind::CPU;
+    MemorySpace memory_space = MemorySpace::Host;
+};
+
 // One launch site: device, artifact, I/O lists, dependency edges, and
 // launch geometry. `dependencies` is the set of NodeIds that must
 // complete before this node fires — the scheduler materialises the
@@ -85,14 +96,16 @@ struct PlanOutput {
 };
 
 // Top-level plan: a name, a schema version, the artifact table, and the
-// live collections. Version 2 adds the artifact table; version 1 plans
-// without artifacts are rejected by the scheduler.
+// live collections. Version 2 adds the artifact table. Version 3 adds
+// the device table; version 1/2 plans remain readable and keep the
+// provider-index meaning for `ExecutableNode::device`.
 struct ExecutionPlan {
-    static constexpr uint32_t kCurrentVersion = 2;
+    static constexpr uint32_t kCurrentVersion = 3;
 
     uint32_t version = kCurrentVersion;
     std::string name;
     std::vector<ArtifactDescriptor> artifacts;
+    std::vector<DeviceDefinition> devices;
     std::vector<TensorDefinition> tensors;
     std::vector<AllocationDefinition> allocations;
     std::vector<ExecutableNode> nodes;
@@ -108,6 +121,8 @@ void to_json(nlohmann::json& j, const TensorDefinition& t);
 void from_json(const nlohmann::json& j, TensorDefinition& t);
 void to_json(nlohmann::json& j, const AllocationDefinition& a);
 void from_json(const nlohmann::json& j, AllocationDefinition& a);
+void to_json(nlohmann::json& j, const DeviceDefinition& d);
+void from_json(const nlohmann::json& j, DeviceDefinition& d);
 void to_json(nlohmann::json& j, const ExecutableNode& n);
 void from_json(const nlohmann::json& j, ExecutableNode& n);
 void to_json(nlohmann::json& j, const PlanInput& i);
