@@ -253,6 +253,11 @@ Result<std::vector<Event>> Scheduler::execute(ExecutionPlan& plan,
         spec.descriptor.shape = tensor.shape;
         spec.descriptor.memory_space = allocation.memory_space;
         spec.descriptor.byte_offset = allocation.byte_offset;
+        spec.descriptor.strides.assign(tensor.shape.size(), 1);
+        for (std::size_t i = tensor.shape.size(); i-- > 1;) {
+            spec.descriptor.strides[i - 1] =
+                spec.descriptor.strides[i] * tensor.shape[i];
+        }
         spec.byte_size = allocation.byte_size;
         spec.alignment = allocation.alignment;
         auto allocated = provider->allocate(spec);

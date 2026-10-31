@@ -25,6 +25,16 @@ target_link_libraries(test_triton_provider
 )
 gtest_discover_tests(test_triton_provider WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+# CPU reference provider and kernel registry.
+add_executable(test_cpu_provider test_cpu_provider.cpp)
+target_link_libraries(test_cpu_provider
+    PRIVATE
+        sparrow::runtime
+        GTest::gtest
+        GTest::gtest_main
+)
+gtest_discover_tests(test_cpu_provider WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 # Task 12 — ExecutionPlan JSON round-trip + topological scheduler
 # exercised via MockDeviceProvider (no real provider dependency).
 add_executable(test_scheduler test_scheduler.cpp)

@@ -13,6 +13,7 @@ add_library(sparrow_runtime STATIC
     lib/result.cpp
     lib/forge_rt.cpp
     lib/providers/triton_provider.cpp
+    lib/providers/cpu_provider.cpp
     lib/providers/astra_provider.cpp
     lib/providers/microgpu_provider.cpp
     lib/execution_plan.cpp
