@@ -34,6 +34,10 @@ constexpr int kBadSdpa = 2312;
 constexpr int kBadReshape = 2313;
 constexpr int kUnknownEntryPoint = 2314;
 constexpr int kBadCopy = 2315;
+constexpr int kBadMul = 2316;
+constexpr int kBadTranspose = 2317;
+constexpr int kBadSelect = 2318;
+constexpr int kBadRelu = 2319;
 
 std::size_t round_up_to(std::size_t n, std::size_t align) {
     return (n + (align - 1)) & ~(align - 1);
@@ -103,6 +107,43 @@ float apply_activation(float x, const std::string& activation) {
     return x;
 }
 
+std::vector<int64_t> broadcast_batch(const std::vector<int64_t>& a,
+                                    const std::vector<int64_t>& b) {
+    const std::size_t rank = std::max(a.size(), b.size());
+    std::vector<int64_t> out(rank, 1);
+    for (std::size_t i = 0; i < rank; ++i) {
+        const int64_t da =
+            i < rank - a.size() ? 1 : a[i - (rank - a.size())];
+        const int64_t db =
+            i < rank - b.size() ? 1 : b[i - (rank - b.size())];
+        if (da == db) {
+            out[i] = da;
+        } else if (da == 1) {
+            out[i] = db;
+        } else if (db == 1) {
+            out[i] = da;
+        } else {
+            return {};
+        }
+    }
+    return out;
+}
+
+std::size_t batch_offset(const std::vector<int64_t>& shape,
+                         const std::vector<int64_t>& coords) {
+    std::size_t offset = 0;
+    const std::size_t rank = shape.size();
+    const std::size_t coord_rank = coords.size();
+    for (std::size_t i = 0; i < rank; ++i) {
+        const int64_t dim = shape[i];
+        const int64_t coordinate =
+            dim == 1 ? 0 : coords[coord_rank - rank + i];
+        offset = offset * static_cast<std::size_t>(dim) +
+                 static_cast<std::size_t>(coordinate);
+    }
+    return offset;
+}
+
 Result<void> launch_gemm(const ArtifactDescriptor& artifact,
                          std::span<const Buffer> inputs,
                          std::span<Buffer> outputs) {
@@ -117,8 +158,8 @@ Result<void> launch_gemm(const ArtifactDescriptor& artifact,
     const auto& a_shape = inputs[0].spec().descriptor.shape;
     const auto& b_shape = inputs[1].spec().descriptor.shape;
     const auto& out_shape = outputs[0].spec().descriptor.shape;
-    if (b_shape.size() != 2 || a_shape.size() < 2) {
-        return Error{"gemm: expected a rank >= 2 and b rank 2", kBadGemm};
+    if (a_shape.size() < 2 || b_shape.size() < 2) {
+        return Error{"gemm: expected rank >= 2 operands", kBadGemm};
     }
 
     const bool transpose_a = artifact.binary.empty()
@@ -131,12 +172,20 @@ Result<void> launch_gemm(const ArtifactDescriptor& artifact,
     const std::size_t a_rank = a_shape.size();
     const int64_t m = transpose_a ? a_shape[a_rank - 1] : a_shape[a_rank - 2];
     const int64_t k = transpose_a ? a_shape[a_rank - 2] : a_shape[a_rank - 1];
-    const int64_t n = transpose_b ? b_shape[0] : b_shape[1];
-    if ((transpose_b ? b_shape[1] : b_shape[0]) != k) {
+    const int64_t n = transpose_b ? b_shape[b_shape.size() - 2] : b_shape[b_shape.size() - 1];
+    const int64_t b_k = transpose_b ? b_shape[b_shape.size() - 1] : b_shape[b_shape.size() - 2];
+    if (b_k != k) {
         return Error{"gemm: inner dimensions do not match", kBadGemm};
     }
 
-    std::vector<int64_t> expected(a_shape.begin(), a_shape.end() - 2);
+    std::vector<int64_t> a_batch(a_shape.begin(), a_shape.end() - 2);
+    std::vector<int64_t> b_batch(b_shape.begin(), b_shape.end() - 2);
+    std::vector<int64_t> batch = broadcast_batch(a_batch, b_batch);
+    if (batch.empty() && !a_batch.empty()) {
+        return Error{"gemm: batch dimensions are not broadcastable", kBadGemm};
+    }
+
+    std::vector<int64_t> expected(batch);
     expected.push_back(m);
     expected.push_back(n);
     if (out_shape != expected) {
@@ -146,29 +195,35 @@ Result<void> launch_gemm(const ArtifactDescriptor& artifact,
         return Error{"gemm: dimensions must be positive", kBadGemm};
     }
 
-    std::size_t batch = 1;
-    for (std::size_t i = 0; i + 2 < a_rank; ++i) {
-        batch *= static_cast<std::size_t>(a_shape[i]);
-    }
+    std::size_t batch_count = 1;
+    for (const int64_t dim : batch) batch_count *= static_cast<std::size_t>(dim);
 
     const float* a = as_float(inputs[0]);
     const float* b = as_float(inputs[1]);
     float* out = as_float(outputs[0]);
-    for (std::size_t batch_index = 0; batch_index < batch; ++batch_index) {
+    std::vector<int64_t> coords(batch.size(), 0);
+    for (std::size_t batch_index = 0; batch_index < batch_count; ++batch_index) {
+        std::size_t remainder = batch_index;
+        for (std::size_t i = batch.size(); i-- > 0;) {
+            coords[i] = static_cast<int64_t>(remainder % static_cast<std::size_t>(batch[i]));
+            remainder /= static_cast<std::size_t>(batch[i]);
+        }
+        const std::size_t a_base =
+            batch_offset(a_batch, coords) * static_cast<std::size_t>(m * k);
+        const std::size_t b_base =
+            batch_offset(b_batch, coords) * static_cast<std::size_t>(k * n);
         for (int64_t row = 0; row < m; ++row) {
             for (int64_t col = 0; col < n; ++col) {
                 float sum = 0.0F;
                 for (int64_t inner = 0; inner < k; ++inner) {
                     const std::size_t a_index =
-                        transpose_a
-                            ? batch_index * static_cast<std::size_t>(k * m) +
-                                  static_cast<std::size_t>(inner * m + row)
-                            : batch_index * static_cast<std::size_t>(m * k) +
-                                  static_cast<std::size_t>(row * k + inner);
+                        a_base + (transpose_a
+                                      ? static_cast<std::size_t>(inner * m + row)
+                                      : static_cast<std::size_t>(row * k + inner));
                     const std::size_t b_index =
-                        transpose_b
-                            ? static_cast<std::size_t>(col * k + inner)
-                            : static_cast<std::size_t>(inner * n + col);
+                        b_base + (transpose_b
+                                      ? static_cast<std::size_t>(col * k + inner)
+                                      : static_cast<std::size_t>(inner * n + col));
                     sum += a[a_index] * b[b_index];
                 }
                 out[batch_index * static_cast<std::size_t>(m * n) +
@@ -441,6 +496,189 @@ Result<void> launch_sdpa(const ArtifactDescriptor& artifact,
     return {};
 }
 
+Result<void> launch_mul(std::span<const Buffer> inputs,
+                        std::span<Buffer> outputs) {
+    if (inputs.size() != 2 || outputs.size() != 1) {
+        return Error{"mul: expected 2 inputs and 1 output", kBadArity};
+    }
+    if (auto err = check_float_buffer(inputs[0], "mul lhs"); !err) return err.error();
+    if (auto err = check_float_buffer(inputs[1], "mul rhs"); !err) return err.error();
+    if (auto err = check_float_buffer(outputs[0], "mul output"); !err) return err.error();
+
+    const auto& out_shape = outputs[0].spec().descriptor.shape;
+    const auto& lhs_shape = inputs[0].spec().descriptor.shape;
+    const auto& rhs_shape = inputs[1].spec().descriptor.shape;
+    if (lhs_shape.size() > out_shape.size() || rhs_shape.size() > out_shape.size()) {
+        return Error{"mul: operand rank exceeds output rank", kBadMul};
+    }
+    const std::size_t total = shape_numel(out_shape);
+    std::vector<int64_t> coords(out_shape.size(), 0);
+    const float* lhs = as_float(inputs[0]);
+    const float* rhs = as_float(inputs[1]);
+    float* out = as_float(outputs[0]);
+    for (std::size_t linear = 0; linear < total; ++linear) {
+        std::size_t remainder = linear;
+        for (std::size_t i = out_shape.size(); i-- > 0;) {
+            coords[i] = static_cast<int64_t>(remainder % static_cast<std::size_t>(out_shape[i]));
+            remainder /= static_cast<std::size_t>(out_shape[i]);
+        }
+        out[linear] = lhs[broadcast_offset(lhs_shape, coords)] *
+                      rhs[broadcast_offset(rhs_shape, coords)];
+    }
+    return {};
+}
+
+Result<void> launch_relu(std::span<const Buffer> inputs,
+                         std::span<Buffer> outputs) {
+    if (inputs.size() != 1 || outputs.size() != 1) {
+        return Error{"relu: expected 1 input and 1 output", kBadArity};
+    }
+    if (auto err = check_float_buffer(inputs[0], "relu input"); !err) return err.error();
+    if (auto err = check_float_buffer(outputs[0], "relu output"); !err) return err.error();
+    if (!same_shape(inputs[0].spec().descriptor.shape,
+                    outputs[0].spec().descriptor.shape)) {
+        return Error{"relu: input and output shapes differ", kBadRelu};
+    }
+    const std::size_t total = shape_numel(inputs[0].spec().descriptor.shape);
+    const float* input = as_float(inputs[0]);
+    float* output = as_float(outputs[0]);
+    for (std::size_t i = 0; i < total; ++i) {
+        output[i] = std::max(0.0F, input[i]);
+    }
+    return {};
+}
+
+Result<void> launch_transpose(const ArtifactDescriptor& artifact,
+                              std::span<const Buffer> inputs,
+                              std::span<Buffer> outputs) {
+    if (inputs.size() != 1 || outputs.size() != 1) {
+        return Error{"transpose: expected 1 input and 1 output", kBadArity};
+    }
+    if (auto err = check_float_buffer(inputs[0], "transpose input"); !err) return err.error();
+    if (auto err = check_float_buffer(outputs[0], "transpose output"); !err) return err.error();
+    const auto& in_shape = inputs[0].spec().descriptor.shape;
+    const auto& out_shape = outputs[0].spec().descriptor.shape;
+    if (in_shape.size() != out_shape.size()) {
+        return Error{"transpose: input and output ranks differ", kBadTranspose};
+    }
+    const std::size_t rank = in_shape.size();
+    if (shape_numel(in_shape) != shape_numel(out_shape)) {
+        return Error{"transpose: input and output element counts differ", kBadTranspose};
+    }
+    std::vector<int64_t> permutation;
+    try {
+        if (!artifact.binary.empty()) {
+            permutation = parse_attributes(artifact).at("permutation").get<std::vector<int64_t>>();
+        }
+    } catch (const nlohmann::json::exception& error) {
+        return Error{"transpose: invalid permutation attribute: " +
+                         std::string(error.what()),
+                     kBadTranspose};
+    }
+    if (permutation.size() != rank) {
+        return Error{"transpose: permutation length does not match rank", kBadTranspose};
+    }
+    std::vector<bool> seen(rank, false);
+    for (const int64_t dim : permutation) {
+        if (dim < 0 || static_cast<std::size_t>(dim) >= rank ||
+            seen[static_cast<std::size_t>(dim)]) {
+            return Error{"transpose: permutation is not a permutation of the rank",
+                         kBadTranspose};
+        }
+        seen[static_cast<std::size_t>(dim)] = true;
+    }
+    for (std::size_t i = 0; i < rank; ++i) {
+        if (out_shape[i] != in_shape[static_cast<std::size_t>(permutation[i])]) {
+            return Error{"transpose: output shape does not match the permutation",
+                         kBadTranspose};
+        }
+    }
+    const std::size_t total = shape_numel(out_shape);
+    std::vector<int64_t> out_coords(rank, 0);
+    std::vector<int64_t> in_coords(rank, 0);
+    std::vector<std::size_t> strides(rank, 1);
+    for (std::size_t i = rank; i-- > 1;) {
+        strides[i - 1] = strides[i] * static_cast<std::size_t>(in_shape[i]);
+    }
+    const float* input = as_float(inputs[0]);
+    float* output = as_float(outputs[0]);
+    for (std::size_t linear = 0; linear < total; ++linear) {
+        std::size_t remainder = linear;
+        for (std::size_t i = rank; i-- > 0;) {
+            out_coords[i] = static_cast<int64_t>(remainder % static_cast<std::size_t>(out_shape[i]));
+            remainder /= static_cast<std::size_t>(out_shape[i]);
+        }
+        for (std::size_t i = 0; i < rank; ++i) {
+            in_coords[static_cast<std::size_t>(permutation[i])] = out_coords[i];
+        }
+        std::size_t source = 0;
+        for (std::size_t i = 0; i < rank; ++i) {
+            source += static_cast<std::size_t>(in_coords[i]) * strides[i];
+        }
+        output[linear] = input[source];
+    }
+    return {};
+}
+
+Result<void> launch_select(const ArtifactDescriptor& artifact,
+                           std::span<const Buffer> inputs,
+                           std::span<Buffer> outputs) {
+    if (inputs.size() != 1 || outputs.size() != 1) {
+        return Error{"select: expected 1 input and 1 output", kBadArity};
+    }
+    if (auto err = check_float_buffer(inputs[0], "select input"); !err) return err.error();
+    if (auto err = check_float_buffer(outputs[0], "select output"); !err) return err.error();
+    const auto& in_shape = inputs[0].spec().descriptor.shape;
+    const auto& out_shape = outputs[0].spec().descriptor.shape;
+    if (in_shape.empty()) {
+        return Error{"select: input must have rank >= 1", kBadSelect};
+    }
+    int64_t dim = -1;
+    int64_t index = 0;
+    try {
+        if (!artifact.binary.empty()) {
+            const nlohmann::json attributes = parse_attributes(artifact);
+            dim = attributes.value("dim", -1);
+            index = attributes.value("index", 0);
+        }
+    } catch (const nlohmann::json::exception& error) {
+        return Error{"select: invalid attributes: " + std::string(error.what()),
+                     kBadSelect};
+    }
+    const int64_t rank = static_cast<int64_t>(in_shape.size());
+    if (dim < 0) dim += rank;
+    if (dim < 0 || dim >= rank) {
+        return Error{"select: dim is out of range", kBadSelect};
+    }
+    if (index < 0 || index >= in_shape[static_cast<std::size_t>(dim)]) {
+        return Error{"select: index is out of range", kBadSelect};
+    }
+    std::vector<int64_t> expected;
+    for (int64_t i = 0; i < rank; ++i) {
+        if (i != dim) expected.push_back(in_shape[static_cast<std::size_t>(i)]);
+    }
+    if (out_shape != expected) {
+        return Error{"select: output shape does not drop the selected dimension",
+                     kBadSelect};
+    }
+    std::size_t outer = 1;
+    for (int64_t i = 0; i < dim; ++i) {
+        outer *= static_cast<std::size_t>(in_shape[static_cast<std::size_t>(i)]);
+    }
+    std::size_t inner = 1;
+    for (int64_t i = dim + 1; i < rank; ++i) {
+        inner *= static_cast<std::size_t>(in_shape[static_cast<std::size_t>(i)]);
+    }
+    const std::size_t width = static_cast<std::size_t>(in_shape[static_cast<std::size_t>(dim)]);
+    const float* input = as_float(inputs[0]);
+    float* output = as_float(outputs[0]);
+    for (std::size_t o = 0; o < outer; ++o) {
+        const float* row = input + (o * width + static_cast<std::size_t>(index)) * inner;
+        std::copy(row, row + inner, output + o * inner);
+    }
+    return {};
+}
+
 Result<void> launch_copy(std::span<const Buffer> inputs,
                          std::span<Buffer> outputs) {
     if (inputs.size() != 1 || outputs.size() != 1) {
@@ -553,6 +791,18 @@ Result<Event> CpuProvider::launch(const ArtifactDescriptor& artifact,
         }
         if (artifact.entry_point == "forge.tensor.scaled_dot_product_attention") {
             return launch_sdpa(artifact, inputs, outputs);
+        }
+        if (artifact.entry_point == "forge.tensor.mul") {
+            return launch_mul(inputs, outputs);
+        }
+        if (artifact.entry_point == "forge.tensor.relu") {
+            return launch_relu(inputs, outputs);
+        }
+        if (artifact.entry_point == "forge.tensor.transpose") {
+            return launch_transpose(artifact, inputs, outputs);
+        }
+        if (artifact.entry_point == "forge.tensor.select") {
+            return launch_select(artifact, inputs, outputs);
         }
         if (artifact.entry_point == "forge.tensor.reshape") {
             return launch_reshape(inputs, outputs);

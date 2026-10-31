@@ -12,12 +12,11 @@ Architecture:
   → MLP: Linear(d_model, d_ff) → gelu → Linear(d_ff, d_model)
   → + x                          # residual
 
-LayerNorm is implemented as a manual mean/var computation (not nn.LayerNorm).
-Linears are constructed via ``_make_linear`` which stores ``weight`` / ``bias``
-as Python closure variables (not module attributes) so that
-``torch.fx.symbolic_trace`` captures them as free variables / placeholders
-— NOT as ``get_attr`` nodes that the Phase 1-8 FX importer rejects with
-``KeyError: 'unknown FX op target: <built-in function getattr>'``.
+The parameters are ordinary ``nn.Linear`` / ``nn.LayerNorm`` modules. The
+FX importer lifts them into execution-plan inputs, so the compiled path
+does not depend on closure-bound weights. Layer normalisation is invoked
+through ``F.layer_norm`` (rather than the module's ``__call__``) so the
+graph exposes one ``aten.layer_norm`` op instead of a submodule call.
 """
 
 from __future__ import annotations
@@ -29,33 +28,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _layer_norm(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
-    mean = x.mean(dim=-1, keepdim=True)
-    var = x.var(dim=-1, keepdim=True, unbiased=False)
-    return (x - mean) / torch.sqrt(var + eps)
-
-
-def _make_linear(in_features: int, out_features: int, bias: bool = True) -> nn.Module:
-    """Build a Linear-equivalent module using closure-bound weights.
-
-    Storing ``weight`` / ``bias`` as Python closure variables (not module
-    attributes) means ``torch.fx.symbolic_trace`` captures them as free
-    variables in the traced graph — NOT as ``get_attr`` nodes (which the
-    Phase 1-8 FX importer cannot lower).
-    """
-    weight = torch.empty(out_features, in_features)
-    nn.init.kaiming_uniform_(weight, a=math.sqrt(5))
-    bias_tensor = torch.zeros(out_features) if bias else None
-    if bias_tensor is not None:
-        fan_in = in_features
-        bound = 1.0 / math.sqrt(fan_in) if fan_in > 0 else 0.0
-        nn.init.uniform_(bias_tensor, -bound, bound)
-
-    class _ClosureLinear(nn.Module):
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return F.linear(x, weight, bias_tensor)
-
-    return _ClosureLinear()
+def _layer_norm(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float
+) -> torch.Tensor:
+    """Layer norm over the last dimension, with explicit gamma and beta."""
+    return F.layer_norm(x, (x.shape[-1],), weight, bias, eps)
 
 
 class TransformerBlock(nn.Module):
@@ -69,26 +46,31 @@ class TransformerBlock(nn.Module):
         self.head_dim = d_model // n_heads
         self.d_ff = d_ff
 
-        self.qkv = _make_linear(d_model, d_model * 3)
-        self.out = _make_linear(d_model, d_model)
-        self.mlp_in = _make_linear(d_model, d_ff)
-        self.mlp_out = _make_linear(d_ff, d_model)
+        self.qkv = nn.Linear(d_model, d_model * 3)
+        self.out = nn.Linear(d_model, d_model)
+        self.mlp_in = nn.Linear(d_model, d_ff)
+        self.mlp_out = nn.Linear(d_ff, d_model)
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ln2 = nn.LayerNorm(d_model)
+        # A rank-1 tensor (not a Python float) so the attention scale is a
+        # first-class broadcast operand in the captured graph.
+        self.register_buffer("attn_scale", torch.tensor([1.0 / math.sqrt(self.head_dim)]))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, S, D = x.shape
         # 1) LayerNorm + QKV projection
-        h = _layer_norm(x)
+        h = _layer_norm(x, self.ln1.weight, self.ln1.bias, self.ln1.eps)
         qkv = self.qkv(h).reshape(B, S, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # (B, n_heads, S, head_dim)
         # 2) Scaled dot-product attention
-        attn_scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        attn_scores = (q @ k.transpose(-2, -1)) * self.attn_scale
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn = attn_weights @ v  # (B, n_heads, S, head_dim)
         attn = attn.transpose(1, 2).reshape(B, S, D)
         # 3) Out projection + residual
         x = x + self.out(attn)
         # 4) LayerNorm + MLP + residual
-        h = _layer_norm(x)
+        h = _layer_norm(x, self.ln2.weight, self.ln2.bias, self.ln2.eps)
         h = self.mlp_out(F.gelu(self.mlp_in(h)))
         x = x + h
         return x

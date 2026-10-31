@@ -78,3 +78,62 @@ def test_fp16_is_rejected() -> None:
 
     with pytest.raises(UnsupportedDtypeError, match="fp32"):
         build_plan(module)
+
+
+class MovementOps(torch.nn.Module):
+    def forward(self, x, scale):
+        y = x.permute(2, 0, 1)  # 2x3x4 -> 4x2x3
+        z = y.reshape(4, 6)
+        row = z[1]  # 6
+        return torch.relu(row * scale) + row
+
+
+def test_movement_ops_become_plan_nodes() -> None:
+    x = torch.randn(2, 3, 4)
+    scale = torch.randn(6)
+    module = _module(MovementOps(), [x, scale])
+    lower_to_tensor(module)
+
+    built = build_plan(module)
+
+    entry_points = [artifact["entry_point"] for artifact in built.plan["artifacts"]]
+    for expected in (
+        "forge.tensor.transpose",
+        "forge.tensor.reshape",
+        "forge.tensor.select",
+        "forge.tensor.mul",
+        "forge.tensor.relu",
+        "forge.tensor.broadcast_add",
+    ):
+        assert expected in entry_points, entry_points
+
+    transpose = next(
+        artifact
+        for artifact in built.plan["artifacts"]
+        if artifact["entry_point"] == "forge.tensor.transpose"
+    )
+    attributes = json.loads(bytes(transpose["binary"]).decode())
+    assert attributes == {"permutation": [2, 0, 1]}
+    json.loads(built.to_json())
+
+
+class AddmmBmm(torch.nn.Module):
+    def forward(self, bias, a, b, d):
+        x = torch.addmm(bias, a, b)  # (4, 5)
+        return torch.bmm(x.reshape(1, 4, 5), d)  # (1, 4, 6)
+
+
+def test_addmm_and_bmm_become_gemm_nodes() -> None:
+    bias, a, b = torch.randn(5), torch.randn(4, 8), torch.randn(8, 5)
+    d = torch.randn(1, 5, 6)
+    module = _module(AddmmBmm(), [bias, a, b, d])
+    lower_to_tensor(module)
+
+    built = build_plan(module)
+
+    artifacts = built.plan["artifacts"]
+    node_entry_points = [artifacts[node["artifact"]]["entry_point"] for node in built.plan["nodes"]]
+    assert node_entry_points.count("forge.tensor.gemm") == 2
+    assert "forge.tensor.broadcast_add" in node_entry_points
+    assert "forge.tensor.reshape" in node_entry_points
+    assert built.outputs[0].shape == (1, 4, 6)

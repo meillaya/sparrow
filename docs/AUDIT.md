@@ -507,9 +507,11 @@ Astra backend or general heterogeneous execution.
 | Mitigated | AUD-09, AUD-36 | Capabilities narrowed; lowering map empty; partitioner raises |
 | Mitigated | AUD-47 through AUD-50 | Astra lowering disabled; CLI rejects the request |
 | Mitigated | AUD-17, AUD-32 | Shared atomic events; plan version and validating parser |
-| Open | AUD-14, AUD-15, AUD-16 | Classic FX importer, cost model, cycle-table drift |
+| Fixed | AUD-14 | M3 lifts `get_attr` parameters and lowers `nn.Linear` / `nn.LayerNorm` `call_module` nodes |
+| Open | AUD-15, AUD-16 | Cost model, cycle-table drift |
 | Open | AUD-24, AUD-26 | Package path rename, pins |
-| Open | AUD-33, AUD-34, AUD-37, AUD-38 | Duplicate maps, test gaps, full-model region calls, provider shapes |
+| Fixed | AUD-33 | M3 canonical `OpSpec` table shared by importer, region, partitioner, and capability check |
+| Open | AUD-34, AUD-37, AUD-38 | Test gaps, full-model region calls, provider shapes |
 | Open | AUD-40, AUD-41, AUD-43 through AUD-46 | Sanitizers, duplicate result types, dead code, stale comments, report durability |
 | Open | AUD-54 through AUD-58 | Astra attributes, compiler test depth, DCE, MicroGPU numerics, roundtrip |
 
@@ -521,3 +523,9 @@ follow-up ran the full local gate on macOS with CMake 4.4, Ninja 1.13, xDSL
 274 pytest cases (1 skipped for missing Triton), ruff, and ty all passed. The
 compiler probe used xDSL 0.74, while the project allows 0.68 through 0.74. The
 Nix development shell and flake were not evaluated.
+
+The M3 follow-up reran the same gate on the same host after the op-coverage
+and transformer-block changes: 42 ctest cases, 35 lit tests, and 296 pytest
+cases (1 skipped for missing Triton), with ruff and ty passing. The transformer
+block now compiles through a CPU plan with ordinary `nn.Linear` parameters,
+which is the acceptance test for AUD-14 and AUD-33.

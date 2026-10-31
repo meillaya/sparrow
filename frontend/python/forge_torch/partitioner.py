@@ -1,4 +1,4 @@
-"""Greedy partitioner per spec §6: pick cheapest valid backend per region subject to capabilities (Phase 7 Wave 4)."""
+"""Greedy partitioner per spec §6: cheapest valid backend per region (Phase 7)."""
 
 # frontend/python/forge_torch/partitioner.py
 #
@@ -23,117 +23,61 @@
 #
 # Spec §6 explicitly defers a DP partitioner to Phase 7b; the greedy form
 # is sufficient for the small Phase 7 transformer (~10 regions).
+#
+# The FX-target mapping lives in :mod:`forge_torch.ops`.
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Final
 
+import torch
 from torch.fx import Node
 
 from forge_torch.capabilities import BackendCapabilities
 from forge_torch.cost_estimator import CostEstimate, estimate_cost
 from forge_torch.lowerings import COMPILER_LOWERINGS
+from forge_torch.ops import (
+    GEMM,
+    LAYER_NORM,
+    cost_shape_for,
+    is_shape_metadata_node,
+    spec_for_aten,
+    spec_for_method,
+)
 
-# ---------------------------------------------------------------------------
-# Per-op shape defaults for cost estimation.
-#
-# When an FX node does not carry ``meta['tensor_meta']`` or
-# ``meta['cost_shape']``, the partitioner falls back to a per-op default.
-# The defaults match the ``cost_estimator`` shape contract:
-#
-#   * matmul / gemm / mm / addmm -> ``[M, N, K]`` with small values so the
-#     Triton vs Astra ranking is sensitive (M=2..8 keeps Triton competitive
-#     when astra's per-tile overhead dominates small shapes).
-#   * elementwise / reductions / reshape -> ``[M, N]``.
-#   * matmul-shaped sdpa -> ``[M, N, K]``.
-# ---------------------------------------------------------------------------
-
-_DEFAULT_COST_SHAPE: Final[dict[str, list[int]]] = {
-    "forge.tensor.gemm": [8, 8, 8],
-    "forge.tensor.fused_epilogue": [8, 8],
-    "forge.tensor.broadcast_add": [8, 8],
-    "forge.tensor.gelu": [8, 8],
-    "forge.tensor.layer_norm": [8, 8],
-    "forge.tensor.softmax": [8, 8],
-    "forge.tensor.scaled_dot_product_attention": [8, 8, 8],
-    "forge.tensor.reshape": [8, 8],
-}
-
-# call_function target → forge.tensor.* op name.
-# (Mirrors ``region.py``'s copy so each module is usable standalone.)
-_ATEN_TO_FORGE_OP: Final[dict[str, str]] = {
-    "aten.mm": "forge.tensor.gemm",
-    "aten.matmul": "forge.tensor.gemm",
-    "aten.addmm": "forge.tensor.gemm",
-    "aten.bmm": "forge.tensor.gemm",
-    "aten.add": "forge.tensor.broadcast_add",
-    "aten.gelu": "forge.tensor.gelu",
-    "aten.relu": "forge.tensor.gelu",
-    "aten.softmax": "forge.tensor.softmax",
-    "aten.layer_norm": "forge.tensor.layer_norm",
-    "aten.view": "forge.tensor.reshape",
-    "aten._unsafe_view": "forge.tensor.reshape",
-    "aten.scaled_dot_product_attention": "forge.tensor.scaled_dot_product_attention",
-}
-
-# call_method → forge.tensor.* op name.
-_METHOD_TO_FORGE_OP: Final[dict[str, str]] = {
-    "mean": "forge.tensor.layer_norm",
-    "var": "forge.tensor.layer_norm",
-    "reshape": "forge.tensor.reshape",
-    "view": "forge.tensor.reshape",
-    "permute": "forge.tensor.reshape",
-    "transpose": "forge.tensor.reshape",
-    "matmul": "forge.tensor.gemm",
-    "add": "forge.tensor.broadcast_add",
-}
-
-# Builtins alias table (mirrors ``op_mapping.normalize_target``).
-_BUILTIN_TO_ATEN: Final[dict[str, str]] = {
-    "matmul": "aten.matmul",
-    "add": "aten.add",
-    "mul": "aten.mul",
-    "gelu": "aten.gelu",
-    "relu": "aten.relu",
-    "silu": "aten.silu",
-    "softmax": "aten.softmax",
-}
-
-
-def _node_target_aten_name(node: Node) -> str:
-    """Best-effort reduction of ``node.target`` to ``aten.<op>`` form."""
-    target = node.target
-    name = getattr(target, "__name__", None)
-    if not name:
-        name = str(target)
-    if name in _BUILTIN_TO_ATEN:
-        return _BUILTIN_TO_ATEN[name]
-    if name.startswith("aten."):
-        return name
-    return f"aten.{name}"
+# call_function target -> forge.tensor.* op name, derived from the
+# canonical table. ``None`` entries are recognised helpers, not tensor ops.
 
 
 def map_node_to_forge_op(node: Node) -> str | None:
     """Map an FX node to its ``forge.tensor.*`` op name, or ``None``.
 
-    Same heuristic as :func:`forge_torch.region.map_node_to_forge_op` —
-    see that module's docstring for the rationale. Kept as a separate copy
-    here so the partitioner can be imported without pulling in the region
-    detector.
+    Same logic as :func:`forge_torch.region.map_node_to_forge_op`; the
+    op names come from :mod:`forge_torch.ops`.
     """
     if node.op in ("placeholder", "output", "get_attr"):
         return None
+    if is_shape_metadata_node(node):
+        return None
     if node.op == "call_module":
-        # nn.Linear / linear-shaped submodules → ``forge.tensor.gemm``.
-        return "forge.tensor.gemm"
+        owning = getattr(node.graph, "owning_module", None)
+        submodule = getattr(owning, str(node.target), None) if owning is not None else None
+        if isinstance(submodule, torch.nn.LayerNorm):  # type: ignore[arg-type]
+            return LAYER_NORM.op
+        return GEMM.op
     target_str = str(node.target)
-    if "getattr" in target_str or "getitem" in target_str:
+    if "getattr" in target_str:
         return None
     if node.op == "call_function":
-        return _ATEN_TO_FORGE_OP.get(_node_target_aten_name(node))
+        try:
+            return spec_for_aten(node.target).op
+        except (KeyError, NotImplementedError):
+            return None
     if node.op == "call_method":
-        return _METHOD_TO_FORGE_OP.get(target_str)
+        try:
+            return spec_for_method(target_str).op
+        except KeyError:
+            return None
     return None
 
 
@@ -147,7 +91,7 @@ def _node_cost_shape(node: Node, op_name: str) -> list[int]:
     2. ``node.meta['tensor_meta']['shape']`` or
        ``node.meta['tensor_meta'].shape`` (the standard FX metadata set by
        ``make_fx``).
-    3. Per-op default in :data:`_DEFAULT_COST_SHAPE`.
+    3. Per-op default from :attr:`forge_torch.ops.OpSpec.cost_shape`.
     """
     meta = getattr(node, "meta", None) or {}
     explicit = meta.get("cost_shape")
@@ -163,7 +107,7 @@ def _node_cost_shape(node: Node, op_name: str) -> list[int]:
             shape = getattr(tensor_meta, "shape", None)
             if shape is not None:
                 return list(shape)
-    return list(_DEFAULT_COST_SHAPE.get(op_name, [1, 1]))
+    return cost_shape_for(op_name)
 
 
 class UnsupportedRegionError(ValueError):

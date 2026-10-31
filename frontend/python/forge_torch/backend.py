@@ -37,7 +37,13 @@ from forge_torch.cache import make_cache_key
 from forge_torch.cache_store import CacheStore
 from forge_torch.capabilities import BACKEND_CAPABILITIES
 from forge_torch.fx_importer import FxImporter
-from forge_torch.op_mapping import normalize_target
+from forge_torch.ops import (
+    ATEN_OPS,
+    is_shape_metadata_node,
+    normalize_target,
+    spec_for_aten,
+    spec_for_method,
+)
 from forge_torch.plan import BuiltPlan, PlanBuildError, build_plan
 from forge_torch.report import CompilationReport
 
@@ -61,47 +67,53 @@ REPORT_PATH = Path(".cache/sparrow/reports/phase1-report.txt")
 #
 # ``compile(target=...)`` looks up ``BACKEND_CAPABILITIES[target]`` and
 # emits a ``UserWarning`` for every op in the captured FX graph that the
-# target cannot run. The ``_ATEN_TO_FORGE_TENSOR`` table is the canonical
-# (FX target) -> (``forge.tensor.<op>`` spelling) translation: the FX
-# importer's dialect uses ``forge.graph.<op>`` (the Phase 1 surface), the
-# capability schema uses ``forge.tensor.<op>`` (the Phase 7 surface), and
-# the partitioner (Task 18) consumes the capability spelling directly.
-# FX ops without a canonical Phase 7 op (e.g. ``aten.relu`` which is
-# still in ``UNSUPPORTED_BUT_RECOGNISED``) are silently skipped — the
-# capability check is a Phase 7 concern and only covers the ops the
-# partitioner routes on.
+# target cannot run. The FX target -> ``forge.tensor.<op>`` translation
+# now comes from the canonical table in :mod:`forge_torch.ops`; the
+# capability schema consumes the same ``forge.tensor.<op>`` spellings as
+# the partitioner. Targets the frontend does not lower are skipped — the
+# capability check is advisory and the importer owns the hard error.
 # ---------------------------------------------------------------------------
 
-_ATEN_TO_FORGE_TENSOR: Final[dict[str, str]] = {
-    "aten.mm": "forge.tensor.gemm",
-    "aten.matmul": "forge.tensor.gemm",
-    "aten.linear": "forge.tensor.gemm",
-    "aten.add": "forge.tensor.broadcast_add",
-    "aten.gelu": "forge.tensor.gelu",
-    "aten.view": "forge.tensor.reshape",
-    "aten._unsafe_view": "forge.tensor.reshape",
-    "aten.softmax": "forge.tensor.softmax",
-    "aten.layer_norm": "forge.tensor.layer_norm",
-    "aten.scaled_dot_product_attention": "forge.tensor.scaled_dot_product_attention",
-}
+_ATEN_TO_FORGE_TENSOR: Final[dict[str, str]] = {name: spec.op for name, spec in ATEN_OPS.items()}
+
+
+def _module_for_node(gm: torch.fx.GraphModule, node: torch.fx.Node):
+    if node.op != "call_module":
+        return None
+    try:
+        return gm.get_submodule(str(node.target))
+    except AttributeError:
+        return None
 
 
 def _fx_ops_to_forge_tensor_ops(gm: torch.fx.GraphModule) -> set[str]:
     """Return the ``forge.tensor.*`` ops present in ``gm``.
 
-    Walks the FX graph in node order and translates each ``call_function``
-    target to its canonical ``forge.tensor.<op>`` spelling via
-    :data:`_ATEN_TO_FORGE_TENSOR`. Non-call_function nodes (placeholders,
-    outputs, get_attr) are skipped — they are not data-flow ops.
+    Walks the FX graph in node order and translates call_function,
+    call_method, and call_module nodes to their canonical
+    ``forge.tensor.<op>`` spelling. Non-data nodes (placeholders, outputs,
+    shape bookkeeping) are skipped because they have no spec entry.
     """
     out: set[str] = set()
     for node in gm.graph.nodes:
-        if node.op != "call_function":
+        if is_shape_metadata_node(node):
             continue
-        normalized = normalize_target(node.target)
-        canonical = _ATEN_TO_FORGE_TENSOR.get(normalized)
-        if canonical is not None:
-            out.add(canonical)
+        if node.op == "call_function":
+            try:
+                out.add(spec_for_aten(node.target).op)
+            except (KeyError, NotImplementedError):
+                continue
+        elif node.op == "call_method":
+            try:
+                out.add(spec_for_method(str(node.target)).op)
+            except KeyError:
+                continue
+        elif node.op == "call_module":
+            module = _module_for_node(gm, node)
+            if isinstance(module, torch.nn.LayerNorm):
+                out.add("forge.tensor.layer_norm")
+            elif isinstance(module, torch.nn.Linear):
+                out.add("forge.tensor.gemm")
     return out
 
 
@@ -148,9 +160,10 @@ def compile(
     native kernel when ``_sparrow_rt`` is built. Other graphs that lower to
     the CPU kernel registry run an execution plan through
     ``_sparrow_rt.execute_plan``. Graphs the registry cannot lower fall back
-    to eager, and ``planning_error`` records why. On a cache miss the
-    function also writes the observability report and attaches it to the
-    callable.
+    to eager, and ``planning_error`` records why. Parameter tensors found
+    through ``get_attr`` are lifted into plan inputs and bound to the live
+    module tensors on each call. On a cache miss the function also writes
+    the observability report and attaches it to the callable.
 
     ``target`` selects the backend for the capability check. One
     :class:`UserWarning` is emitted per captured op that the target's
@@ -162,6 +175,7 @@ def compile(
     importer = FxImporter(example_inputs)
     module = importer.import_module(gm)
     mlir_text = str(module)
+    lifted_inputs = tuple(importer.lifted_tensors)
 
     native_runner = _native_runner_for(gm, example_inputs)
     built_plan: BuiltPlan | None = None
@@ -226,6 +240,7 @@ def compile(
         plan_json=built_plan.to_json() if built_plan is not None else None,
         plan_runtime=plan_runtime,
         planning_error=planning_error,
+        lifted_inputs=lifted_inputs,
     )
 
 
@@ -289,7 +304,8 @@ class CompiledFusedMLP:
     The textual ``mlir_text`` is retained for diagnostics (and for the
     pytest round-trip assertion in ``test_fx_importer.py``). The callable
     prefers the native fused-MLP kernel, then a CPU execution plan, then
-    eager for graphs the CPU registry cannot lower. The eventual
+    eager for graphs the CPU registry cannot lower. Lifted parameter
+    tensors are appended to the caller's arguments when the plan runs. The eventual
     lowered-execution backend will swap ``__call__`` for a call into
     ForgeRT (Task 11).
 
@@ -323,6 +339,7 @@ class CompiledFusedMLP:
         plan_json: str | None = None,
         plan_runtime=None,
         planning_error: str | None = None,
+        lifted_inputs: tuple[torch.Tensor, ...] = (),
     ) -> None:
         self.model = model
         self.example_inputs = example_inputs
@@ -335,6 +352,7 @@ class CompiledFusedMLP:
         self._plan_json = plan_json
         self._plan_runtime = plan_runtime
         self.planning_error = planning_error
+        self._lifted_inputs = lifted_inputs
         self.lowered = native_runner is not None or plan_json is not None
         if native_runner is not None:
             self.execution = "native"
@@ -371,6 +389,7 @@ class CompiledFusedMLP:
             )
         if self._plan_json is not None and self._plan_runtime is not None:
             arrays = [arg.detach().cpu().numpy() for arg in args]
+            arrays.extend(tensor.detach().cpu().numpy() for tensor in self._lifted_inputs)
             outputs = self._plan_runtime.execute_plan(self._plan_json, arrays)
             if len(outputs) == 1:
                 return torch.from_numpy(outputs[0])
@@ -628,6 +647,8 @@ def _native_runner_for(
 
     targets: list[str] = []
     for node in gm.graph.nodes:
+        if is_shape_metadata_node(node):
+            continue
         if node.op == "call_function":
             targets.append(normalize_target(node.target))
     if sorted(targets) != ["aten.add", "aten.gelu", "aten.matmul"]:

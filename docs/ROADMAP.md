@@ -1,8 +1,8 @@
 # Sparrow roadmap
 
 The audit and [SPEC.md](SPEC.md) describe the contracts. This file tracks the
-remaining milestones from the completion plan. M1 and M2 are implemented; M3
-through M7 are open.
+remaining milestones from the completion plan. M1 through M3 are implemented;
+M4 through M7 are open.
 
 ## Landed
 
@@ -28,20 +28,21 @@ through M7 are open.
   `sparrow`.
 - The backend wraps a single tensor output in the tuple Dynamo expects.
 
-## Open
-
 ### M3: op coverage and canonical mapping
 
-- Replace the mapping tables in `op_mapping.py`, `region.py`,
-  `partitioner.py`, and `backend.py` with one `OpSpec` table.
-- Add `aten.relu`, `aten.mul`, `aten.addmm`, `aten.bmm`, `aten.permute`,
-  `aten.transpose`, and call-function reshape. Each needs a dialect op or
-  lowering, a CPU kernel, a plan mapping, and a test.
-- Compile `models/transformer_block.py` with its normal `nn.Linear` parameters.
-  This requires replacing the closure weights and supporting indexing or
-  selecting heads.
-- Acceptance: the transformer block matches eager through a plan with no
-  closure workaround.
+- `forge_torch.ops` is the single `OpSpec` table; `op_mapping`, `region`,
+  `partitioner`, and `backend` derive their views from it.
+- `forge.tensor.relu`, `forge.tensor.mul`, `forge.tensor.transpose`, and
+  `forge.tensor.select` join the dialect, CPU registry, and plan builder.
+- `aten.addmm` and `aten.bmm` lower to gemm; `aten.permute`, `aten.transpose`,
+  and call-function reshape lower through the movement ops.
+- The importer lifts `get_attr` parameters into plan inputs, resolves shape
+  arithmetic from the example inputs, and lowers `nn.Linear` /
+  `nn.LayerNorm` `call_module` nodes.
+- `models/transformer_block.py` uses ordinary `nn.Linear` / `nn.LayerNorm`
+  parameters and runs through a CPU plan.
+
+## Open
 
 ### M4: devices, selection, and cost
 
@@ -91,5 +92,6 @@ through M7 are open.
    and a Python plan test.
 2. A backend does not become selectable until its lowering map and provider
    acceptance tests pass.
-3. A graph outside the supported set must not be described as compiled. The
-   current `planning_error` field records the fallback until M3 closes it.
+3. A graph outside the supported set must not be described as compiled.
+   `compile()` keeps the eager fallback and records the reason in
+   `planning_error`.

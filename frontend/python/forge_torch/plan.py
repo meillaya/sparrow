@@ -26,9 +26,13 @@ from compiler.lib.Dialect.Tensor import (
     GeluOp,
     GemmOp,
     LayerNormOp,
+    MulOp,
+    ReluOp,
     ReshapeOp,
     ScaledDotProductAttentionOp,
+    SelectOp,
     SoftmaxOp,
+    TransposeOp,
 )
 
 CPU_TARGET = 4
@@ -122,6 +126,19 @@ def _artifact_for(op: object) -> tuple[str, dict[str, Any]]:
         }
     if isinstance(op, BroadcastAddOp):
         return "forge.tensor.broadcast_add", {}
+    if isinstance(op, MulOp):
+        return "forge.tensor.mul", {}
+    if isinstance(op, ReluOp):
+        return "forge.tensor.relu", {}
+    if isinstance(op, TransposeOp):
+        return "forge.tensor.transpose", {
+            "permutation": list(op.permutation_dims()),
+        }
+    if isinstance(op, SelectOp):
+        return "forge.tensor.select", {
+            "dim": int(op.dim.data),
+            "index": int(op.index.data),
+        }
     if isinstance(op, GeluOp):
         return "forge.tensor.gelu", {
             "approximate": bool(op.approximate),
@@ -130,8 +147,9 @@ def _artifact_for(op: object) -> tuple[str, dict[str, Any]]:
         epsilon = op.epsilon
         if not isinstance(epsilon, FloatAttr):
             raise PlanBuildError("layer_norm epsilon must be a FloatAttr")
+        raw_epsilon = getattr(epsilon, "value", epsilon)
         return "forge.tensor.layer_norm", {
-            "epsilon": float(epsilon.data),
+            "epsilon": float(getattr(raw_epsilon, "data", raw_epsilon)),
         }
     if isinstance(op, SoftmaxOp):
         return "forge.tensor.softmax", {

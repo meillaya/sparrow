@@ -170,6 +170,83 @@ TEST(CpuProvider, FusedEpilogueAddsBiasAndActivation) {
     EXPECT_FLOAT_EQ(out[2], 1.0F);
 }
 
+TEST(CpuProvider, GemmHandlesBatchedSecondOperand) {
+    std::vector<float> a{1, 2, 3, 4, 5, 6, 7, 8};  // 2x2x2
+    std::vector<float> b{1, 0, 0, 1, 2, 0, 0, 2};  // 2x2x2 (identity, 2*identity)
+    std::vector<float> out(8, 0.0F);
+    std::vector<Buffer> inputs;
+    inputs.push_back(view(a, {2, 2, 2}));
+    inputs.push_back(view(b, {2, 2, 2}));
+    std::vector<Buffer> outputs;
+    outputs.push_back(view(out, {2, 2, 2}));
+
+    CpuProvider provider;
+    const auto result = provider.launch(artifact("forge.tensor.gemm"), inputs, outputs, {});
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    EXPECT_EQ(out, (std::vector<float>{1, 2, 3, 4, 10, 12, 14, 16}));
+}
+
+TEST(CpuProvider, MulBroadcastsTrailingOperand) {
+    std::vector<float> x{1, 2, 3, 4};
+    std::vector<float> scale{10, 20};
+    std::vector<float> out(4, 0.0F);
+    std::vector<Buffer> inputs;
+    inputs.push_back(view(x, {2, 2}));
+    inputs.push_back(view(scale, {2}));
+    std::vector<Buffer> outputs;
+    outputs.push_back(view(out, {2, 2}));
+
+    CpuProvider provider;
+    const auto result = provider.launch(artifact("forge.tensor.mul"), inputs, outputs, {});
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    EXPECT_EQ(out, (std::vector<float>{10, 40, 30, 80}));
+}
+
+TEST(CpuProvider, ReluClampsNegatives) {
+    std::vector<float> x{-2.0F, -0.5F, 0.0F, 3.0F};
+    std::vector<float> out(4, 0.0F);
+    std::vector<Buffer> inputs;
+    inputs.push_back(view(x, {4}));
+    std::vector<Buffer> outputs;
+    outputs.push_back(view(out, {4}));
+
+    CpuProvider provider;
+    const auto result = provider.launch(artifact("forge.tensor.relu"), inputs, outputs, {});
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    EXPECT_EQ(out, (std::vector<float>{0.0F, 0.0F, 0.0F, 3.0F}));
+}
+
+TEST(CpuProvider, TransposeAppliesPermutation) {
+    std::vector<float> x{1, 2, 3, 4, 5, 6};  // 2x3
+    std::vector<float> out(6, 0.0F);
+    std::vector<Buffer> inputs;
+    inputs.push_back(view(x, {2, 3}));
+    std::vector<Buffer> outputs;
+    outputs.push_back(view(out, {3, 2}));
+
+    CpuProvider provider;
+    const auto result = provider.launch(
+        artifact("forge.tensor.transpose", R"({"permutation":[1,0]})"), inputs,
+        outputs, {});
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    EXPECT_EQ(out, (std::vector<float>{1, 4, 2, 5, 3, 6}));
+}
+
+TEST(CpuProvider, SelectDropsIndexedDimension) {
+    std::vector<float> x{1, 2, 3, 4, 5, 6};  // 2x3
+    std::vector<float> out(3, 0.0F);
+    std::vector<Buffer> inputs;
+    inputs.push_back(view(x, {2, 3}));
+    std::vector<Buffer> outputs;
+    outputs.push_back(view(out, {3}));
+
+    CpuProvider provider;
+    const auto result = provider.launch(
+        artifact("forge.tensor.select", R"({"dim":0,"index":1})"), inputs, outputs, {});
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    EXPECT_EQ(out, (std::vector<float>{4, 5, 6}));
+}
+
 TEST(CpuProvider, RejectsWrongTarget) {
     std::vector<float> x{1};
     std::vector<float> out(1, 0.0F);

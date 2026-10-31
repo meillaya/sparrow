@@ -93,6 +93,26 @@ _DIALECT_TO_BACKEND_OP: Final[dict[str, dict[str, str | None]]] = {
         "astra": None,
         "microgpu": "add",
     },
+    "forge.tensor.mul": {
+        "triton": "broadcast_add",
+        "astra": None,
+        "microgpu": "add",
+    },
+    "forge.tensor.relu": {
+        "triton": "gelu",
+        "astra": "vector_gelu",
+        "microgpu": None,
+    },
+    "forge.tensor.transpose": {
+        "triton": "gelu",
+        "astra": None,
+        "microgpu": None,
+    },
+    "forge.tensor.select": {
+        "triton": "gelu",
+        "astra": None,
+        "microgpu": None,
+    },
     "forge.tensor.gelu": {
         "triton": "gelu",
         "astra": "vector_gelu",

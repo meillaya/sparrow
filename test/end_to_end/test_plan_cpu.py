@@ -79,3 +79,30 @@ def test_plan_rejects_wrong_input_shape() -> None:
 
     with pytest.raises(ValueError, match="shape"):
         compiled(inputs[0][:1], *inputs[1:])
+
+
+class LinearStack(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc1 = torch.nn.Linear(8, 16)
+        self.fc2 = torch.nn.Linear(16, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(self.fc2(torch.nn.functional.gelu(self.fc1(x))))
+
+
+def test_module_parameters_are_lifted_into_the_plan(tmp_path) -> None:
+    torch.manual_seed(0)
+    model = LinearStack().eval()
+    x = torch.randn(2, 8)
+    with torch.no_grad():
+        expected = model(x)
+
+    compiled = compile(model, [x], cache_store=CacheStore(tmp_path / "cache"))
+    with torch.no_grad():
+        actual = compiled(x)
+
+    assert compiled.execution == "cpu"
+    assert compiled.planning_error is None
+    assert len(compiled._lifted_inputs) == 4
+    assert torch.allclose(actual, expected, atol=1e-5, rtol=1e-5)

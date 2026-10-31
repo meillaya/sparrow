@@ -1,31 +1,21 @@
 """FX → MLIR importer for Sparrow.
 
 The :class:`FxImporter` walks a captured ``torch.fx.GraphModule`` and emits
-``forge.graph`` dialect MLIR as a Python string. It is the Phase-1 bridge
-between PyTorch's symbolic-graph capture (spec §3, item 3) and the xDSL
-dialect surface defined under :mod:`compiler.lib.Dialect.Graph`.
+``forge.graph`` / ``forge.tensor`` dialect MLIR. It is the bridge between
+PyTorch's symbolic graph capture and the xDSL dialect surface defined
+under :mod:`compiler.lib.Dialect`.
 
-Usage
------
->>> from forge_torch.fx_importer import FxImporter
->>> imported = FxImporter(example_inputs).import_graph(gm)
->>> # ``imported`` is a textual MLIR module parseable by ``forge-opt --action=roundtrip``.
+Two capture styles are supported:
 
-Design
-------
-The importer consumes the FX graph in two passes:
+* ``torch.fx.symbolic_trace`` — parameter tensors appear as ``get_attr``
+  nodes and shape arithmetic appears as ``getattr`` / ``getitem`` nodes.
+  The importer lifts parameters into extra function arguments and folds
+  shape expressions using the example inputs.
+* ``make_fx`` / Dynamo — parameters are already graph placeholders and
+  ``tensor_meta`` carries concrete shapes.
 
-1. **Type inference pass** — for every node we compute the resulting
-   ``!forge.tensor<...>`` shape + dtype, sourced from
-   ``node.meta['tensor_meta']`` when present (the common path with
-   ``make_fx`` / ``torch.export``) or from Python-level shape inference
-   driven by :attr:`example_inputs` otherwise.
-2. **Emission pass** — we build a ``func.func`` holding a single block
-   whose argument types match the placeholders, then insert each op in
-   FX order, resolving operands via a node-name → SSAValue map.
-
-Op translation rules live in :mod:`forge_torch.op_mapping` — this module
-only orchestrates the xDSL IRBuilder.
+The op translation table lives in :mod:`forge_torch.ops`; this module
+only orchestrates type inference and the xDSL IRBuilder.
 """
 
 from __future__ import annotations
@@ -34,7 +24,6 @@ import importlib
 import io
 import sys
 from pathlib import Path
-from typing import ClassVar
 
 import torch
 from torch.fx import GraphModule, Node
@@ -53,7 +42,18 @@ from xdsl.dialects.func import FuncOp, ReturnOp  # noqa: E402
 from xdsl.ir import Block, Region, SSAValue  # noqa: E402
 from xdsl.printer import Printer  # noqa: E402
 
-from forge_torch.op_mapping import DTYPE_TO_FORGE, map_node_to_forge  # noqa: E402
+from forge_torch.ops import (  # noqa: E402
+    DTYPE_TO_FORGE,
+    GELU,
+    GEMM,
+    RESHAPE,
+    SELECT,
+    TRANSPOSE,
+    OpSpec,
+    normalize_target,
+    spec_for_aten,
+    spec_for_method,
+)
 
 
 def _default_function_name(gm: GraphModule) -> str:
@@ -63,14 +63,7 @@ def _default_function_name(gm: GraphModule) -> str:
 
 
 class FxImporter:
-    """Walk a ``torch.fx.GraphModule`` and emit ``forge.graph`` MLIR text."""
-
-    _GRAPH_OPS: ClassVar[dict[str, str]] = {
-        "forge.graph.matmul": "matmul",
-        "forge.graph.add": "add",
-        "forge.graph.gelu": "gelu",
-        "forge.graph.view": "view",
-    }
+    """Walk a ``torch.fx.GraphModule`` and emit forge dialect MLIR."""
 
     def __init__(
         self,
@@ -84,6 +77,15 @@ class FxImporter:
         # spec §3 ``B >= 1, S >= 1`` example. Opt-in so the existing
         # concrete-shape tests (Task 8, Phase 1) keep passing.
         self._symbolic_heuristic = symbolic_heuristic
+        #: Parameter / buffer tensors lifted into function arguments, in
+        #: argument order after the user placeholders.
+        self.lifted_tensors: list[torch.Tensor] = []
+        self._lifted: dict[str, torch.Tensor] = {}
+        self._lifted_order: list[str] = []
+        self._lifted_ssa: dict[str, SSAValue] = {}
+        self._node_lifted_key: dict[str, str] = {}
+        self._shape_values: dict[str, object] = {}
+        self._node_types: dict[str, object] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -99,22 +101,23 @@ class FxImporter:
     def import_module(self, gm: GraphModule) -> ModuleOp:
         """Import ``gm`` and return the verified xDSL module."""
         graph = gm.graph if hasattr(gm, "graph") else gm
-        node_types: dict[str, object] = self._infer_node_types(graph)
+        self._lifted = {}
+        self._lifted_order = []
+        self._lifted_ssa = {}
+        self._node_lifted_key = {}
+        self._shape_values = {}
+        node_types = self._infer_node_types(graph, gm)
+        self._node_types = node_types
 
-        placeholder_names, placeholder_types = [], []
-        for name, typ in node_types.items():
-            placeholder_names.append(name)
-            placeholder_types.append(typ)
-        # ``_infer_node_types`` walks in FX order and writes placeholders
-        # first; partition them deterministically.
-        ordered_names: list[str] = []
-        ordered_types: list = []
+        placeholder_names: list[str] = []
+        placeholder_types: list = []
         for node in list(graph.nodes):
             if node.op == "placeholder":
-                ordered_names.append(node.name)
-                ordered_types.append(node_types[node.name])
-        placeholder_names = ordered_names
-        placeholder_types = ordered_types
+                placeholder_names.append(node.name)
+                placeholder_types.append(node_types[node.name])
+
+        lifted_names = list(self._lifted_order)
+        lifted_types = [self._tensor_type_for_tensor(self._lifted[name]) for name in lifted_names]
 
         output_node = _output_node(graph)
         if output_node is None:
@@ -125,31 +128,40 @@ class FxImporter:
             output_arg_names = [_arg_name(a) for a in flat_args]
             output_types = [node_types[name] for name in output_arg_names]
 
-        block = Block(arg_types=placeholder_types)
+        all_input_types = placeholder_types + lifted_types
+        block = Block(arg_types=all_input_types)
         func = FuncOp.from_region(
             _default_function_name(gm),
-            input_types=placeholder_types,
+            input_types=all_input_types,
             return_types=output_types,
             region=Region(block),
         )
 
         ssa_values: dict[str, SSAValue] = {}
-        for arg, name in zip(block.args, placeholder_names, strict=True):
+        for arg, name in zip(block.args[: len(placeholder_names)], placeholder_names, strict=True):
             ssa_values[name] = arg
+        for arg, name in zip(block.args[len(placeholder_names) :], lifted_names, strict=True):
+            self._lifted_ssa[name] = arg
 
         builder = Builder(InsertPoint.at_start(block))
         for node in list(graph.nodes):
-            if node.op in ("placeholder", "output", "call_module"):
+            if node.op in ("placeholder", "output", "get_attr"):
+                continue
+            if node.name in self._shape_values:
                 continue
             if node.op == "call_function":
                 self._emit_call_function(builder, node, ssa_values)
                 continue
-            if node.op == "get_attr":
+            if node.op == "call_method":
+                self._emit_call_method(builder, node, ssa_values)
+                continue
+            if node.op == "call_module":
+                self._emit_call_module(builder, node, ssa_values, gm)
                 continue
             raise AssertionError(f"unhandled FX node.op: {node.op!r}")  # pragma: no cover
 
         if output_node is not None:
-            operands = [ssa_values[name] for name in output_arg_names]
+            operands = [self._lookup_ssa(name, ssa_values) for name in output_arg_names]
             builder.insert(ReturnOp.create(operands=operands, result_types=[]))
         elif output_types:
             builder.insert(ReturnOp.create(operands=[], result_types=[]))
@@ -157,27 +169,35 @@ class FxImporter:
         func.verify()
         module = ModuleOp([func])
         module.verify()
+        self.lifted_tensors = [self._lifted[name] for name in lifted_names]
         return module
 
     # ------------------------------------------------------------------
     # Type inference (pass 1)
     # ------------------------------------------------------------------
 
-    def _infer_node_types(self, graph) -> dict[str, object]:
+    def _infer_node_types(self, graph, gm: GraphModule) -> dict[str, object]:
         out: dict[str, object] = {}
+        self._node_types = out
         self._placeholder_cursor = 0
         for node in list(graph.nodes):
             if node.op == "placeholder":
                 out[node.name] = self._infer_placeholder_type(node)
                 self._placeholder_cursor += 1
-            elif node.op == "call_function":
-                out[node.name] = self._infer_call_type(node, out)
-            elif node.op == "call_module" or node.op == "output":
-                continue
             elif node.op == "get_attr":
-                raise NotImplementedError(
-                    "FX get_attr nodes are not yet supported by Sparrow frontend."
-                )
+                out[node.name] = self._infer_get_attr_type(node, gm)
+            elif node.op == "call_function":
+                if self._try_shape_expr(node):
+                    continue
+                out[node.name] = self._infer_call_type(node, out, gm)
+            elif node.op == "call_method":
+                if self._try_shape_expr(node):
+                    continue
+                out[node.name] = self._infer_method_type(node, out)
+            elif node.op == "call_module":
+                out[node.name] = self._infer_call_module_type(node, out, gm)
+            elif node.op == "output":
+                continue
             else:
                 raise NotImplementedError(
                     f"unsupported FX node.op: {node.op!r} (target={node.target!r})"
@@ -199,54 +219,259 @@ class FxImporter:
             )
         return self._forge_tensor_cls()(list(shape), dtype_str)
 
-    def _infer_call_type(self, node: Node, node_types: dict[str, object]):
-        target_name = map_node_to_forge(node.target)
-        operand_types = [node_types[n] for n in _data_arg_names(node)]
+    # -- shape expressions -------------------------------------------------
 
+    def _try_shape_expr(self, node: Node) -> bool:
+        """Record ``node`` as static shape metadata and return ``True``."""
+        if node.op == "call_method":
+            name = str(node.target)
+            if name == "size":
+                base = _arg_node(node.args[0]) if node.args else None
+                if base is None or base.name not in self._node_types:
+                    return False
+                shape = self._shape_of_type(self._node_types[base.name])
+                if len(node.args) == 1:
+                    self._shape_values[node.name] = tuple(shape)
+                else:
+                    dim = _as_int(node.args[1])
+                    if dim is None:
+                        return False
+                    self._shape_values[node.name] = shape[_normalize_dim(dim, len(shape))]
+                return True
+            if name == "dim":
+                base = _arg_node(node.args[0]) if node.args else None
+                if base is None or base.name not in self._node_types:
+                    return False
+                self._shape_values[node.name] = len(
+                    self._shape_of_type(self._node_types[base.name])
+                )
+                return True
+            if name == "numel":
+                base = _arg_node(node.args[0]) if node.args else None
+                if base is None or base.name not in self._node_types:
+                    return False
+                self._shape_values[node.name] = _numel(
+                    self._shape_of_type(self._node_types[base.name])
+                )
+                return True
+            return False
+
+        if node.op != "call_function":
+            return False
+        target = node.target
+        normalized = normalize_target(target)
+        if normalized in {"aten.sym_size", "aten.sym_numel"}:
+            base = _arg_node(node.args[0]) if node.args else None
+            if base is None or base.name not in self._node_types:
+                return False
+            shape = self._shape_of_type(self._node_types[base.name])
+            if normalized == "aten.sym_numel":
+                self._shape_values[node.name] = _numel(shape)
+            elif len(node.args) > 1:
+                dim = self._resolve_int(node.args[1])
+                self._shape_values[node.name] = shape[_normalize_dim(dim, len(shape))]
+            return True
+        raw = str(target)
+        if "getattr" in raw:
+            if len(node.args) < 2:
+                return False
+            base = _arg_node(node.args[0])
+            attr = node.args[1]
+            if base is None or attr != "shape" or base.name not in self._node_types:
+                return False
+            self._shape_values[node.name] = tuple(self._shape_of_type(self._node_types[base.name]))
+            return True
+        if "getitem" in raw:
+            if len(node.args) < 2:
+                return False
+            base = _arg_node(node.args[0])
+            if base is None or base.name not in self._shape_values:
+                return False
+            value = self._shape_values[base.name]
+            index = self._resolve_int(node.args[1])
+            if not isinstance(value, tuple):
+                return False
+            self._shape_values[node.name] = value[index]
+            return True
+        if normalized in _INT_OPS:
+            values: list[int] = []
+            for arg in node.args:
+                value = self._resolve_int_maybe(arg)
+                if value is None:
+                    return False
+                values.append(value)
+            self._shape_values[node.name] = _apply_int_op(normalized, values)
+            return True
+        return False
+
+    def _resolve_int(self, value: object) -> int:
+        resolved = self._resolve_int_maybe(value)
+        if resolved is None:
+            raise NotImplementedError(
+                f"cannot resolve {value!r} to a static integer; Sparrow needs "
+                "concrete shapes for the CPU plan"
+            )
+        return resolved
+
+    def _resolve_int_maybe(self, value: object) -> int | None:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, Node):
+            stored = self._shape_values.get(value.name)
+            if isinstance(stored, int):
+                return stored
+            target = str(value.target)
+            if value.op == "call_function" and "getitem" in target and len(value.args) >= 2:
+                base = _arg_node(value.args[0])
+                if base is not None and base.name in self._shape_values:
+                    container = self._shape_values[base.name]
+                    index = self._resolve_int_maybe(value.args[1])
+                    if index is not None and isinstance(container, tuple):
+                        item = container[index]
+                        return item if isinstance(item, int) else None
+        return None
+
+    def _resolve_shape(self, value: object) -> list[int]:
+        """Resolve a reshape/permute target to concrete ints."""
+        if isinstance(value, Node):
+            stored = self._shape_values.get(value.name)
+            if stored is not None:
+                value = stored
+        if isinstance(value, (tuple, list)):
+            dims: list[int] = []
+            for item in value:
+                dims.append(self._resolve_int(item))
+            return dims
+        return [self._resolve_int(value)]
+
+    # -- tensor ops --------------------------------------------------------
+
+    def _infer_call_type(self, node: Node, node_types: dict[str, object], gm: GraphModule):
+        self._check_supported_scalars(node)
         meta_type = self._tensor_type(node)
         if meta_type is not None:
             return meta_type
+        spec = spec_for_aten(node.target)
+        operands = [node_types[name] for name in self._operand_names(node)]
+        normalized = normalize_target(node.target)
+        return self._infer_spec_type(spec, node, operands, normalized)
 
+    @staticmethod
+    def _check_supported_scalars(node: Node) -> None:
+        """Reject aten forms whose scalar modifiers the lowering ignores."""
+        if normalize_target(node.target) != "aten.addmm":
+            return
+        kwargs = getattr(node, "kwargs", {}) or {}
+        for name in ("alpha", "beta"):
+            value = kwargs.get(name, 1)
+            if value != 1:
+                raise NotImplementedError(
+                    f"aten.addmm {name}={value!r} is not supported; the CPU "
+                    "lowering implements the default alpha=1, beta=1 form"
+                )
+
+    def _infer_method_type(self, node: Node, node_types: dict[str, object]):
+        meta_type = self._tensor_type(node)
+        if meta_type is not None:
+            return meta_type
+        spec = spec_for_method(str(node.target))
+        operands = [node_types[name] for name in self._operand_names(node)]
+        return self._infer_spec_type(spec, node, operands, f"method.{node.target}")
+
+    def _infer_spec_type(
+        self,
+        spec: OpSpec,
+        node: Node,
+        operand_types: list,
+        variant: str,
+    ):
         forge_tensor = self._forge_tensor_cls()
-        if target_name == "forge.graph.matmul":
+        if spec.op == GEMM.op:
+            normalized = variant if variant.startswith("aten.") else normalize_target(node.target)
+            if normalized == "aten.linear":
+                return _infer_linear_type(operand_types, forge_tensor)
+            if normalized == "aten.addmm" or variant == "method.addmm":
+                if len(operand_types) < 3:
+                    raise ValueError("aten.addmm needs bias, a, and b operands")
+                return _infer_matmul_type(operand_types[1:], forge_tensor)
             return _infer_matmul_type(operand_types, forge_tensor)
-        if target_name == "forge.graph.add":
-            return _infer_add_type(operand_types, forge_tensor)
-        if target_name == "forge.graph.linear":
-            return _infer_linear_type(operand_types, forge_tensor)
-        if target_name == "forge.graph.gelu":
+        if spec.op in {"forge.tensor.broadcast_add", "forge.tensor.mul"}:
+            return _infer_broadcast_binary(operand_types, forge_tensor)
+        if spec.op in {"forge.tensor.gelu", "forge.tensor.relu", "forge.tensor.layer_norm"}:
             operand = _expect_tensor(operand_types[0], forge_tensor)
             return forge_tensor(list(_shape_seq(operand)), _dtype_str(operand))
-        if target_name == "forge.graph.view":
+        if spec.op == "forge.tensor.softmax":
+            operand = _expect_tensor(operand_types[0], forge_tensor)
+            return forge_tensor(list(_shape_seq(operand)), _dtype_str(operand))
+        if spec.op == "forge.tensor.scaled_dot_product_attention":
+            operand = _expect_tensor(operand_types[0], forge_tensor)
+            return forge_tensor(list(_shape_seq(operand)), _dtype_str(operand))
+        if spec.op == RESHAPE.op:
             operand = _expect_tensor(operand_types[0], forge_tensor)
             operand_shape = list(_shape_seq(operand))
             if any(isinstance(d, str) for d in operand_shape):
-                # Symbolic dims present — view can't infer a concrete
-                # reshape target. Pass the operand shape through; the
-                # downstream verifier (which already rejects this when the
-                # target doesn't match element count) will surface the
-                # situation when the symbolic-dim runtime evaluator lands.
                 return forge_tensor(operand_shape, _dtype_str(operand))
-            target_shape = _extract_view_target_shape(node)
+            target_shape = _extract_reshape_target(node, self._resolve_shape, allow_symbolic=True)
             if target_shape is None:
                 raise NotImplementedError(
-                    "aten.view without a concrete shape cannot be lowered "
-                    "in Phase 1 (would need symbolic-shape inference)."
+                    "reshape without a concrete target shape cannot be lowered to the CPU plan"
                 )
             return forge_tensor(list(target_shape), _dtype_str(operand))
-        # Task 14 tensor-dialect ops (route directly to forge.tensor.*,
-        # bypassing the GraphToTensor pass — these were not modelled in
-        # the Phase 1 forge.graph dialect).
-        if target_name == "forge.tensor.layer_norm":
+        if spec.op == TRANSPOSE.op:
             operand = _expect_tensor(operand_types[0], forge_tensor)
-            return forge_tensor(list(_shape_seq(operand)), _dtype_str(operand))
-        if target_name == "forge.tensor.softmax":
+            shape = list(_shape_seq(operand))
+            permutation = self._permutation_for(node, len(shape))
+            return forge_tensor([shape[i] for i in permutation], _dtype_str(operand))
+        if spec.op == SELECT.op:
             operand = _expect_tensor(operand_types[0], forge_tensor)
-            return forge_tensor(list(_shape_seq(operand)), _dtype_str(operand))
-        if target_name == "forge.tensor.scaled_dot_product_attention":
-            operand = _expect_tensor(operand_types[0], forge_tensor)
-            return forge_tensor(list(_shape_seq(operand)), _dtype_str(operand))
-        raise AssertionError(f"unknown forge op: {target_name!r}")  # pragma: no cover
+            shape = list(_shape_seq(operand))
+            dim = self._select_dim_for(node, len(shape))
+            return forge_tensor(shape[:dim] + shape[dim + 1 :], _dtype_str(operand))
+        raise AssertionError(f"no shape rule for {spec.op}")  # pragma: no cover
+
+    def _infer_call_module_type(self, node: Node, node_types: dict[str, object], gm: GraphModule):
+        meta_type = self._tensor_type(node)
+        if meta_type is not None:
+            return meta_type
+        module = gm.get_submodule(str(node.target))
+        operand_names = self._operand_names(node)
+        if not operand_names:
+            raise NotImplementedError(f"call_module {node.target!r} has no tensor input")
+        operand = _expect_tensor(node_types[operand_names[0]], self._forge_tensor_cls())
+        shape = list(_shape_seq(operand))
+        dtype = _dtype_str(operand)
+        if isinstance(module, torch.nn.Linear):
+            self._register_lifted(f"{node.target}.weight", module.weight)
+            if module.bias is not None:
+                self._register_lifted(f"{node.target}.bias", module.bias)
+            return self._forge_tensor_cls()([*shape[:-1], module.out_features], dtype)
+        if isinstance(module, torch.nn.LayerNorm):
+            if module.weight is None or module.bias is None:
+                raise NotImplementedError(
+                    f"call_module target {node.target!r} is an nn.LayerNorm without "
+                    "affine parameters; the CPU layer-norm op requires gamma and beta"
+                )
+            self._register_lifted(f"{node.target}.weight", module.weight)
+            self._register_lifted(f"{node.target}.bias", module.bias)
+            return self._forge_tensor_cls()(shape, dtype)
+        raise NotImplementedError(
+            f"call_module target {node.target!r} ({type(module).__name__}) is not "
+            "supported; only nn.Linear and nn.LayerNorm are lowered"
+        )
+
+    def _infer_get_attr_type(self, node: Node, gm: GraphModule):
+        value = _lookup_attr(gm, str(node.target))
+        if not isinstance(value, torch.Tensor):
+            raise NotImplementedError(
+                f"get_attr target {node.target!r} is not a tensor; only parameter "
+                "and buffer tensors can be lifted into the plan"
+            )
+        key = str(node.target)
+        self._register_lifted(key, value)
+        self._node_lifted_key[node.name] = key
+        return self._tensor_type_for_tensor(value)
 
     # ------------------------------------------------------------------
     # Op emission (pass 2)
@@ -258,77 +483,284 @@ class FxImporter:
         node: Node,
         ssa_values: dict[str, SSAValue],
     ) -> None:
-        target_name = map_node_to_forge(node.target)
-        operands = [ssa_values[n] for n in _data_arg_names(node)]
-        result_type = self._result_type_for(node, operands)
-        if target_name == "forge.graph.linear":
+        spec = spec_for_aten(node.target)
+        operands = self._ssa_operands(node, ssa_values)
+        result_type = self._node_types[node.name]
+        normalized = normalize_target(node.target)
+
+        if spec.op == GEMM.op:
+            value = self._emit_gemm(builder, node, operands, result_type, normalized)
+            ssa_values[node.name] = value
+            return
+        if spec.op == RESHAPE.op:
+            graph_mod = self._load_graph_dialect()
+            op = graph_mod.ViewOp.create(operands=operands[:1], result_types=[result_type])
+            builder.insert(op)
+            ssa_values[node.name] = op.results[0]
+            return
+        if spec.op == TRANSPOSE.op:
             tensor_mod = self._load_tensor_dialect()
+            permutation = self._permutation_for(node, len(_shape_seq(result_type)))
+            op = tensor_mod.TransposeOp.create(
+                operands=operands[:1],
+                result_types=[result_type],
+                properties={
+                    "permutation": tensor_mod.ArrayAttr(
+                        [tensor_mod.IntAttr(int(d)) for d in permutation]
+                    )
+                },
+            )
+            builder.insert(op)
+            ssa_values[node.name] = op.results[0]
+            return
+        if spec.op == SELECT.op:
+            tensor_mod = self._load_tensor_dialect()
+            dim, index = self._select_index_for(node)
+            op = tensor_mod.SelectOp.create(
+                operands=operands[:1],
+                result_types=[result_type],
+                properties={
+                    "dim": tensor_mod.IntAttr(int(dim)),
+                    "index": tensor_mod.IntAttr(int(index)),
+                },
+            )
+            builder.insert(op)
+            ssa_values[node.name] = op.results[0]
+            return
+        op = _build_op(spec, operands, result_type, node)
+        builder.insert(op)
+        ssa_values[node.name] = op.results[0]
+
+    def _emit_call_method(
+        self,
+        builder: Builder,
+        node: Node,
+        ssa_values: dict[str, SSAValue],
+    ) -> None:
+        spec = spec_for_method(str(node.target))
+        operands = self._ssa_operands(node, ssa_values)
+        result_type = self._node_types[node.name]
+        if spec.op == GEMM.op:
+            value = self._emit_gemm(builder, node, operands, result_type, f"method.{node.target}")
+            ssa_values[node.name] = value
+            return
+        if spec.op == RESHAPE.op:
+            graph_mod = self._load_graph_dialect()
+            op = graph_mod.ViewOp.create(operands=operands[:1], result_types=[result_type])
+            builder.insert(op)
+            ssa_values[node.name] = op.results[0]
+            return
+        if spec.op == TRANSPOSE.op:
+            tensor_mod = self._load_tensor_dialect()
+            shape = _shape_seq(result_type)
+            permutation = self._permutation_for(node, len(shape))
+            op = tensor_mod.TransposeOp.create(
+                operands=operands[:1],
+                result_types=[result_type],
+                properties={
+                    "permutation": tensor_mod.ArrayAttr(
+                        [tensor_mod.IntAttr(int(d)) for d in permutation]
+                    )
+                },
+            )
+            builder.insert(op)
+            ssa_values[node.name] = op.results[0]
+            return
+        if spec.op == "forge.tensor.broadcast_add":
+            tensor_mod = self._load_tensor_dialect()
+            op = tensor_mod.BroadcastAddOp.create(operands=operands, result_types=[result_type])
+            builder.insert(op)
+            ssa_values[node.name] = op.results[0]
+            return
+        if spec.op == "forge.tensor.mul":
+            tensor_mod = self._load_tensor_dialect()
+            op = tensor_mod.MulOp.create(operands=operands, result_types=[result_type])
+            builder.insert(op)
+            ssa_values[node.name] = op.results[0]
+            return
+        raise AssertionError(f"no method lowering for {spec.op}")  # pragma: no cover
+
+    def _emit_call_module(
+        self,
+        builder: Builder,
+        node: Node,
+        ssa_values: dict[str, SSAValue],
+        gm: GraphModule,
+    ) -> None:
+        module = gm.get_submodule(str(node.target))
+        operands = self._ssa_operands(node, ssa_values)
+        result_type = self._node_types[node.name]
+        tensor_mod = self._load_tensor_dialect()
+        if isinstance(module, torch.nn.Linear):
+            weight = self._lifted_ssa[f"{node.target}.weight"]
             gemm = tensor_mod.GemmOp.create(
-                operands=[operands[0], operands[1]],
+                operands=[operands[0], weight],
                 result_types=[result_type],
                 properties={"transpose_b": BoolAttr.from_bool(True)},
             )
             builder.insert(gemm)
             value = gemm.results[0]
-            if len(operands) == 3:
+            if module.bias is not None:
+                bias = self._lifted_ssa[f"{node.target}.bias"]
                 add = tensor_mod.BroadcastAddOp.create(
-                    operands=[value, operands[2]],
-                    result_types=[result_type],
+                    operands=[value, bias], result_types=[result_type]
                 )
                 builder.insert(add)
                 value = add.results[0]
             ssa_values[node.name] = value
             return
-        op = _build_op(target_name, operands, result_type, node)
-        builder.insert(op)
-        ssa_values[node.name] = op.results[0]
+        if isinstance(module, torch.nn.LayerNorm):
+            weight = self._lifted_ssa[f"{node.target}.weight"]
+            bias = self._lifted_ssa[f"{node.target}.bias"]
+            op = tensor_mod.LayerNormOp.create(
+                operands=[operands[0], weight, bias],
+                result_types=[result_type],
+                properties={
+                    "epsilon": tensor_mod.FloatAttr(float(module.eps), tensor_mod.Float32Type()),
+                },
+            )
+            builder.insert(op)
+            ssa_values[node.name] = op.results[0]
+            return
+        raise AssertionError(f"no call_module lowering for {type(module).__name__}")
 
-    def _result_type_for(self, node: Node, operands: list):
-        meta_type = self._tensor_type(node)
-        if meta_type is not None:
-            return meta_type
-        forge_tensor = self._forge_tensor_cls()
-        target_name = map_node_to_forge(node.target)
-        if target_name == "forge.graph.matmul":
-            return _infer_matmul_type(_operand_types(operands, forge_tensor), forge_tensor)
-        if target_name == "forge.graph.add":
-            return _infer_add_type(_operand_types(operands, forge_tensor), forge_tensor)
-        if target_name == "forge.graph.linear":
-            return _infer_linear_type(_operand_types(operands, forge_tensor), forge_tensor)
-        if target_name == "forge.graph.gelu":
-            operand_type = _expect_tensor(operands[0].type, forge_tensor)
-            return forge_tensor(list(_shape_seq(operand_type)), _dtype_str(operand_type))
-        if target_name == "forge.graph.view":
-            operand_type = _expect_tensor(operands[0].type, forge_tensor)
-            operand_shape = list(_shape_seq(operand_type))
-            if any(isinstance(d, str) for d in operand_shape):
-                # Symbolic dims: view can't infer a concrete reshape
-                # target. Pass the operand shape through; the dialect's
-                # view verifier already permits same-shape passes, so a
-                # symbolic-dim runtime will be free to specialise later.
-                return forge_tensor(operand_shape, _dtype_str(operand_type))
-            target_shape = _extract_view_target_shape(node)
-            if target_shape is None:
-                raise NotImplementedError(
-                    "aten.view without a concrete shape cannot be lowered "
-                    "in Phase 1 (would need symbolic-shape inference)."
+    def _emit_gemm(
+        self,
+        builder: Builder,
+        node: Node,
+        operands: list[SSAValue],
+        result_type,
+        variant: str,
+    ) -> SSAValue:
+        """Emit a gemm plus an optional bias add for linear/addmm."""
+        graph_mod = self._load_graph_dialect()
+        tensor_mod = self._load_tensor_dialect()
+        normalized = variant if variant.startswith("aten.") else normalize_target(node.target)
+        if normalized == "aten.linear":
+            a, b = operands[0], operands[1]
+            bias = operands[2] if len(operands) > 2 else None
+            gemm = tensor_mod.GemmOp.create(
+                operands=[a, b],
+                result_types=[result_type],
+                properties={"transpose_b": BoolAttr.from_bool(True)},
+            )
+            builder.insert(gemm)
+            value = gemm.results[0]
+            if bias is not None:
+                add = tensor_mod.BroadcastAddOp.create(
+                    operands=[value, bias], result_types=[result_type]
                 )
-            return forge_tensor(list(target_shape), _dtype_str(operand_type))
-        # Task 14 tensor-dialect ops — see note in `_infer_call_type`.
-        if target_name == "forge.tensor.layer_norm":
-            operand_type = _expect_tensor(operands[0].type, forge_tensor)
-            return forge_tensor(list(_shape_seq(operand_type)), _dtype_str(operand_type))
-        if target_name == "forge.tensor.softmax":
-            operand_type = _expect_tensor(operands[0].type, forge_tensor)
-            return forge_tensor(list(_shape_seq(operand_type)), _dtype_str(operand_type))
-        if target_name == "forge.tensor.scaled_dot_product_attention":
-            operand_type = _expect_tensor(operands[0].type, forge_tensor)
-            return forge_tensor(list(_shape_seq(operand_type)), _dtype_str(operand_type))
-        raise AssertionError(f"unknown forge op: {target_name!r}")  # pragma: no cover
+                builder.insert(add)
+                value = add.results[0]
+            return value
+        if normalized == "aten.addmm" or variant == "method.addmm":
+            if len(operands) < 3:
+                raise NotImplementedError("aten.addmm needs a bias operand")
+            bias, a, b = operands[0], operands[1], operands[2]
+            gemm = tensor_mod.GemmOp.create(operands=[a, b], result_types=[result_type])
+            builder.insert(gemm)
+            add = tensor_mod.BroadcastAddOp.create(
+                operands=[gemm.results[0], bias], result_types=[result_type]
+            )
+            builder.insert(add)
+            return add.results[0]
+        op = graph_mod.MatmulOp.create(operands=operands[:2], result_types=[result_type])
+        builder.insert(op)
+        return op.results[0]
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _operand_names(self, node: Node) -> list[str]:
+        """Names of the tensor SSA values flowing into ``node``.
+
+        Shape bookkeeping nodes are filtered out (they have no SSA value),
+        as are Python literals such as reshape sizes. Kwargs are scanned
+        because ``aten.layer_norm`` passes weight and bias there.
+        """
+        names: list[str] = []
+        for arg in node.args:
+            if isinstance(arg, Node) and arg.name not in self._shape_values:
+                names.append(arg.name)
+            elif isinstance(arg, (tuple, list)):
+                for item in arg:
+                    if isinstance(item, Node) and item.name not in self._shape_values:
+                        names.append(item.name)
+        for arg in getattr(node, "kwargs", {}).values():
+            if isinstance(arg, (tuple, list)):
+                for item in arg:
+                    if isinstance(item, Node) and item.name not in self._shape_values:
+                        names.append(item.name)
+            elif isinstance(arg, Node) and arg.name not in self._shape_values:
+                names.append(arg.name)
+        return names
+
+    def _ssa_operands(self, node: Node, ssa_values: dict[str, SSAValue]) -> list[SSAValue]:
+        return [self._lookup_ssa(name, ssa_values) for name in self._operand_names(node)]
+
+    def _lookup_ssa(self, name: str, ssa_values: dict[str, SSAValue]) -> SSAValue:
+        value = ssa_values.get(name)
+        if value is not None:
+            return value
+        key = self._node_lifted_key.get(name)
+        if key is None:
+            raise KeyError(f"no SSA value for {name!r}")
+        return self._lifted_ssa[key]
+
+    def _permutation_for(self, node: Node, rank: int) -> list[int]:
+        target = str(node.target)
+        normalized = normalize_target(node.target) if node.op == "call_function" else target
+        if normalized == "aten.t" or target == "t":
+            return list(reversed(range(rank)))
+        if normalized in {"aten.permute"} or target == "permute":
+            dims: object = node.args[1] if len(node.args) == 2 else list(node.args[1:])
+            return [_normalize_dim(self._resolve_int(d), rank) for d in _as_dims(dims)]
+        dims_pair = list(node.args[1:3])
+        if len(dims_pair) == 2:
+            dim0 = _normalize_dim(self._resolve_int(dims_pair[0]), rank)
+            dim1 = _normalize_dim(self._resolve_int(dims_pair[1]), rank)
+            permutation = list(range(rank))
+            permutation[dim0], permutation[dim1] = permutation[dim1], permutation[dim0]
+            return permutation
+        raise NotImplementedError(f"cannot derive a permutation for {node!r}")
+
+    def _select_index_for(self, node: Node) -> tuple[int, int]:
+        normalized = (
+            normalize_target(node.target) if node.op == "call_function" else str(node.target)
+        )
+        if normalized == "aten.select":
+            shape = self._shape_of_type(self._node_types[self._operand_names(node)[0]])
+            dim = _normalize_dim(self._resolve_int(node.args[1]), len(shape))
+            index = self._resolve_int(node.args[2])
+            return dim, index
+        # ``operator.getitem`` / ``aten.getitem``: one integer index on dim 0.
+        index = self._resolve_int(node.args[1])
+        return 0, index
+
+    def _select_dim_for(self, node: Node, rank: int) -> int:
+        normalized = (
+            normalize_target(node.target) if node.op == "call_function" else str(node.target)
+        )
+        if normalized == "aten.select":
+            return _normalize_dim(self._resolve_int(node.args[1]), rank)
+        return 0
+
+    def _tensor_type_for_tensor(self, tensor: torch.Tensor):
+        dtype_str = DTYPE_TO_FORGE.get(tensor.dtype)
+        if dtype_str is None:
+            raise NotImplementedError(
+                f"parameter dtype {tensor.dtype!r} is not supported by the Sparrow dialects."
+            )
+        return self._forge_tensor_cls()(list(tensor.shape), dtype_str)
+
+    def _register_lifted(self, key: str, tensor: torch.Tensor) -> None:
+        if key not in self._lifted:
+            self._lifted[key] = tensor
+            self._lifted_order.append(key)
+
+    def _shape_of_type(self, type_attr: object) -> tuple:
+        return _shape_seq(type_attr)
 
     def _tensor_type(self, node: Node):
         meta = node.meta.get("tensor_meta") if hasattr(node, "meta") else None
@@ -371,20 +803,9 @@ class FxImporter:
         the FusedMLP-style heuristic (``B, S, <concrete>`` for 3D inputs)
         when :attr:`_symbolic_heuristic` is set. Returns ``None`` to fall
         through to concrete dim emission.
-
-        Difference between the two paths:
-        * ``tensor_meta['symbolic_dim']`` path — ``None`` entries become
-          anonymous ``?`` (the constraint list is positional over them).
-        * Heuristic path — ``None`` entries mean "fall back to the
-          original concrete dim value", so a 3D FusedMLP-shaped input
-          becomes ``!forge.tensor<BxSx4096xf32, [...]>`` instead of
-          ``BxSx?xf32``.
         """
         meta = getattr(node, "meta", None) or {}
         tensor_meta = meta.get("tensor_meta")
-        # ``tensor_meta`` may be a dict (hand-rolled metadata) or a
-        # ``TensorMetadata`` dataclass (the torch.fx canonical case). Both
-        # must surface ``symbolic_dim`` if it's set.
         symbolic_meta: object | None = None
         if tensor_meta is not None:
             if isinstance(tensor_meta, dict):
@@ -394,9 +815,6 @@ class FxImporter:
         if symbolic_meta is None:
             symbolic_meta = meta.get("symbolic_dim")
         sym_names: list[str | None] | None = None
-        # ``None_means_concrete`` distinguishes the two paths: anonymous
-        # ``?`` on explicit ``tensor_meta['symbolic_dim']`` paths, original
-        # concrete dim on the FusedMLP heuristic.
         none_means_concrete = False
         if symbolic_meta is not None:
             if isinstance(symbolic_meta, str):
@@ -409,10 +827,6 @@ class FxImporter:
                     f"must be a string or a list of strings, got {type(symbolic_meta).__name__}"
                 )
         elif self._symbolic_heuristic and len(shape) == 3:
-            # Named B/S for the first two dims, concrete for the rest
-            # (matches spec §3 "B >= 1, S >= 1" + a concrete 4096/11008).
-            # ``None`` entries mean "keep the original concrete dim"; the
-            # resulting MLIR is ``!forge.tensor<BxSx4096xf32, [...]>``.
             sym_names = ["B", "S"] + [None] * (len(shape) - 2)
             none_means_concrete = True
 
@@ -470,6 +884,93 @@ class FxImporter:
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
+_INT_OPS = frozenset(
+    {
+        "aten.add",
+        "aten.sub",
+        "aten.mul",
+        "aten.floordiv",
+        "aten.truediv",
+        "aten.mod",
+        "aten.pow",
+    }
+)
+
+
+def _apply_int_op(name: str, values: list[int]) -> int:
+    if len(values) == 1:
+        return values[0]
+    left, right = values[0], values[1]
+    if name == "aten.add":
+        return left + right
+    if name == "aten.sub":
+        return left - right
+    if name == "aten.mul":
+        return left * right
+    if name == "aten.floordiv":
+        return left // right
+    if name == "aten.truediv":
+        return left // right
+    if name == "aten.mod":
+        return left % right
+    if name == "aten.pow":
+        return left**right
+    raise AssertionError(name)  # pragma: no cover
+
+
+def _arg_node(value: object) -> Node | None:
+    return value if isinstance(value, Node) else None
+
+
+def _as_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _as_dims(value: object) -> list:
+    if isinstance(value, (tuple, list)):
+        return list(value)
+    return [value]
+
+
+def _normalize_dim(dim: int, rank: int) -> int:
+    resolved = dim + rank if dim < 0 else dim
+    if not (0 <= resolved < rank):
+        raise ValueError(f"dimension {dim} is out of range for rank {rank}")
+    return resolved
+
+
+def _numel(shape: tuple) -> int:
+    total = 1
+    for dim in shape:
+        if not isinstance(dim, int):
+            raise NotImplementedError(f"cannot compute numel of symbolic shape {shape}")
+        total *= dim
+    return total
+
+
+def _lookup_attr(gm: GraphModule, target: str) -> object:
+    try:
+        return gm.get_parameter(target)
+    except AttributeError:
+        pass
+    try:
+        return gm.get_buffer(target)
+    except AttributeError:
+        pass
+    value: object = gm
+    try:
+        for part in target.split("."):
+            value = getattr(value, part)
+    except AttributeError as exc:
+        raise NotImplementedError(
+            f"get_attr target {target!r} does not resolve to an attribute"
+        ) from exc
+    return value
+
 
 def _placeholder_index(node: Node) -> int:
     count = 0
@@ -487,22 +988,8 @@ def _expect_tensor(value, forge_tensor):
     return value
 
 
-def _ssa_type(ssa_value: SSAValue, forge_tensor):
-    return ssa_value.type
-
-
-def _operand_types(operands: list, forge_tensor) -> list:
-    return [_expect_tensor(operand.type, forge_tensor) for operand in operands]  # type: ignore[union-attr]
-
-
 def _shape_seq(tensor_type) -> tuple:
-    """Return the raw dim values, preserving symbolic dims as strings.
-
-    Concrete dims become ``int`` (e.g. ``4096``); symbolic dims become
-    ``str`` (e.g. ``"B"``). Downstream shape inference treats them
-    opaquely — no integer arithmetic on the strings — so symbolic dims
-    survive the matmul / add / gelu inference path without crashing.
-    """
+    """Return the raw dim values, preserving symbolic dims as strings."""
     out: list = []
     for d in tensor_type.shape.data:
         v = d.data
@@ -547,7 +1034,6 @@ def _infer_matmul_type(operand_types: list, forge_tensor):
     shape_b = list(_shape_seq(b))
     if len(shape_a) < 2 or len(shape_b) < 2:
         raise ValueError(f"forge.graph.matmul needs rank>=2 operands, got {shape_a} and {shape_b}")
-    # Inner-dim check: concrete must match; symbolic is acceptable.
     inner_a = shape_a[-1]
     inner_b = shape_b[-2]
     if isinstance(inner_a, int) and isinstance(inner_b, int) and inner_a != inner_b:
@@ -576,24 +1062,22 @@ def _infer_linear_type(operand_types: list, forge_tensor):
     return forge_tensor([*x_shape[:-1], w_shape[0]], _dtype_str(x))
 
 
-def _infer_add_type(operand_types: list, forge_tensor):
+def _infer_broadcast_binary(operand_types: list, forge_tensor):
     a = _expect_tensor(operand_types[0], forge_tensor)
     b = _expect_tensor(operand_types[1], forge_tensor)
-    shape_a = list(_shape_seq(a))
-    shape_b = list(_shape_seq(b))
-    out_shape = _broadcast(shape_a, shape_b)
+    out_shape = _broadcast(list(_shape_seq(a)), list(_shape_seq(b)))
     if out_shape is None:
-        raise ValueError(f"add: shapes {shape_a} and {shape_b} are not broadcastable")
+        raise ValueError(
+            f"binary op: shapes {_shape_seq(a)} and {_shape_seq(b)} are not broadcastable"
+        )
     return forge_tensor(list(out_shape), _dtype_str(a))
 
 
-def _arg_name(arg) -> str:
-    """FX graph ``Node.args`` entries are :class:`Node` or Python literals.
+def _infer_add_type(operand_types: list, forge_tensor):
+    return _infer_broadcast_binary(operand_types, forge_tensor)
 
-    The :class:`output` node is the only place this helper is still useful —
-    call_function args always go through :func:`_data_arg_names`, which
-    filters out non-Node entries (constant lists like ``aten.view``'s size).
-    """
+
+def _arg_name(arg) -> str:
     if isinstance(arg, Node):
         return arg.name
     raise TypeError(
@@ -603,35 +1087,23 @@ def _arg_name(arg) -> str:
     )
 
 
-def _data_arg_names(node: Node) -> list[str]:
-    """Names of the data (tensor) SSAValues flowing into ``node``.
-
-    ``torch.fx`` stores a call_function's args as ``tuple[Argument, ...]``
-    where each entry is either a :class:`Node` (data dependency) or a Python
-    literal (constant / kwarg-passed shape list). Only the Nodes correspond
-    to ``forge.tensor`` SSAValues; everything else is filtered here so the
-    downstream ``ssa_values`` lookup is unambiguous.
-
-    Kwargs are scanned too: ``aten.layer_norm(x, [shape], weight=w, bias=b)``
-    passes the weight + bias Nodes via kwargs, and the Sparrow importer
-    needs them as SSA operands. Keyword-only constants (e.g. ``eps=1e-5``)
-    are filtered just like positional constants.
-    """
-    names = []
-    for arg in node.args:
-        if isinstance(arg, Node):
-            names.append(arg.name)
-        elif isinstance(arg, (tuple, list)):
-            continue
-    for arg in getattr(node, "kwargs", {}).values():
-        if isinstance(arg, Node):
-            names.append(arg.name)
-    return names
+def _extract_reshape_target(node: Node, resolver, *, allow_symbolic: bool) -> list[int] | None:
+    args = list(node.args)
+    if len(args) < 2:
+        return None
+    target = args[1] if len(args) == 2 else list(args[1:])
+    if not isinstance(target, (list, tuple)) and not isinstance(target, Node):
+        return None
+    try:
+        return resolver(target)
+    except NotImplementedError:
+        if allow_symbolic:
+            return None
+        raise
 
 
 def _flatten_output_args(args):
-    """FX ``output`` nodes may carry a single Node or a tuple/list of them
-    (the latter is what ``torch.export`` emits to model multi-result outputs)."""
+    """FX ``output`` nodes may carry a single Node or a tuple/list of them."""
     flat = []
     for arg in args:
         if isinstance(arg, (tuple, list)):
@@ -648,29 +1120,20 @@ def _output_node(graph):
     return None
 
 
-def _extract_view_target_shape(node: Node) -> list[int] | None:
-    args = list(node.args)
-    if len(args) < 2:
-        return None
-    target = args[1]
-    if isinstance(target, (list, tuple)) and all(isinstance(d, int) for d in target):
-        return [int(d) for d in target]
-    return None
-
-
-def _build_op(target_name: str, operands: list, result_type, node: Node | None = None):
+def _build_op(spec: OpSpec, operands: list, result_type, node: Node | None = None):
     graph_mod = FxImporter._load_graph_dialect()
-    if target_name == "forge.graph.matmul":
-        return graph_mod.MatmulOp.create(operands=operands, result_types=[result_type])
-    if target_name == "forge.graph.add":
-        return graph_mod.AddOp.create(operands=operands, result_types=[result_type])
-    if target_name == "forge.graph.gelu":
-        return graph_mod.GeluOp.create(operands=operands, result_types=[result_type])
-    if target_name == "forge.graph.view":
-        return graph_mod.ViewOp.create(operands=operands, result_types=[result_type])
-    # Task 14 tensor-dialect ops — see note in `_infer_call_type`.
     tensor_mod = FxImporter._load_tensor_dialect()
-    if target_name == "forge.tensor.layer_norm":
+    if spec.op == GEMM.op:
+        return graph_mod.MatmulOp.create(operands=operands, result_types=[result_type])
+    if spec.op == "forge.tensor.broadcast_add":
+        return graph_mod.AddOp.create(operands=operands, result_types=[result_type])
+    if spec.op == GELU.op:
+        return graph_mod.GeluOp.create(operands=operands, result_types=[result_type])
+    if spec.op == "forge.tensor.mul":
+        return tensor_mod.MulOp.create(operands=operands, result_types=[result_type])
+    if spec.op == "forge.tensor.relu":
+        return tensor_mod.ReluOp.create(operands=operands, result_types=[result_type])
+    if spec.op == "forge.tensor.layer_norm":
         return tensor_mod.LayerNormOp.create(
             operands=operands,
             result_types=[result_type],
@@ -680,46 +1143,37 @@ def _build_op(target_name: str, operands: list, result_type, node: Node | None =
                 ),
             },
         )
-    if target_name == "forge.tensor.softmax":
+    if spec.op == "forge.tensor.softmax":
         return tensor_mod.SoftmaxOp.create(
             operands=operands,
             result_types=[result_type],
             properties={"dim": tensor_mod.IntAttr(int(_extract_softmax_dim(node)))},
         )
-    if target_name == "forge.tensor.scaled_dot_product_attention":
+    if spec.op == "forge.tensor.scaled_dot_product_attention":
         return tensor_mod.ScaledDotProductAttentionOp.create(
             operands=operands,
             result_types=[result_type],
             properties={"num_heads": tensor_mod.IntAttr(1)},
         )
-    raise AssertionError(f"_build_op: unknown forge op {target_name!r}")  # pragma: no cover
+    raise AssertionError(f"_build_op: unknown forge op {spec.op!r}")  # pragma: no cover
 
 
 def _extract_layer_norm_eps(node: Node | None) -> float:
-    """Pull the ``eps`` positional arg out of an ``aten.layer_norm`` FX node.
-
-    ``aten.layer_norm`` is ``(input, normalized_shape, weight, bias, eps)``
-    positionally, so eps sits at ``args[4]``. Fall back to the dialect
-    default (``1e-5``) if the arg is missing / not a real number — happens
-    in synthetic FX graphs that elide the eps arg.
-    """
+    """Pull ``eps`` out of an ``aten.layer_norm`` FX node."""
     if node is None:
         return 1e-5
     args = list(getattr(node, "args", ()))
     if len(args) >= 5 and isinstance(args[4], (int, float)):
         return float(args[4])
+    kwargs = getattr(node, "kwargs", {}) or {}
+    eps = kwargs.get("eps")
+    if isinstance(eps, (int, float)) and not isinstance(eps, bool):
+        return float(eps)
     return 1e-5
 
 
 def _extract_softmax_dim(node: Node | None) -> int:
-    """Pull the ``dim`` arg out of an ``aten.softmax`` FX node.
-
-    The Aten spelling ``aten.softmax(input, dim, dtype=None)`` is positional;
-    but ``torch.fx.symbolic_trace`` of the Python wrapper
-    ``torch.nn.functional.softmax(x, dim=-1, dtype=None)`` captures ``dim``
-    as a kwarg. Check both args[1] and kwargs['dim'] so the importer works
-    on either capture mode.
-    """
+    """Pull ``dim`` out of an ``aten.softmax`` FX node (args or kwargs)."""
     if node is None:
         return -1
     args = list(getattr(node, "args", ()))

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from xdsl.dialects.builtin import BoolAttr, Float32Type, FloatAttr, IntAttr
+from xdsl.dialects.builtin import ArrayAttr, BoolAttr, Float32Type, FloatAttr, IntAttr
 from xdsl.ir import Dialect, EnumAttribute, SSAValue
 from xdsl.irdl import (
     IRDLOperation,
@@ -415,6 +415,236 @@ class GeluOp(IRDLOperation):
 
 
 # ---------------------------------------------------------------------------
+# ReLU op
+# ---------------------------------------------------------------------------
+
+
+@irdl_op_definition
+class ReluOp(IRDLOperation):
+    """
+    `forge.tensor.relu` — rectified linear unit, shape- and dtype-preserving.
+
+        x   : !forge.tensor<S>
+        out : !forge.tensor<S>
+    """
+
+    name = "forge.tensor.relu"
+    x = operand_def(TensorType)
+    out = result_def(TensorType)
+
+    traits = traits_def(Pure(), NoMemoryEffect())
+
+    assembly_format = "$x attr-dict `:` `(` type($x) `)` `->` type($out)"
+
+    def __init__(self, x):
+        super().__init__(operands=[x])
+
+    def verify_(self) -> None:
+        x_type = _check_tensor(self.x, "forge.tensor.relu operand 'x'")
+        out_type = _check_tensor(self.out, "forge.tensor.relu result")
+        if x_type.dtype != out_type.dtype:
+            raise VerifyException(
+                "forge.tensor.relu result dtype must match input: "
+                f"{out_type.dtype} vs {x_type.dtype}"
+            )
+        if _static_shape(x_type) != _static_shape(out_type):
+            raise VerifyException(
+                "forge.tensor.relu result shape must equal input shape: "
+                f"got {_static_shape(out_type)}, expected {_static_shape(x_type)}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Multiply op
+# ---------------------------------------------------------------------------
+
+
+@irdl_op_definition
+class MulOp(IRDLOperation):
+    """
+    `forge.tensor.mul` — element-wise multiplication with NumPy-style
+    broadcasting, the multiplicative twin of ``broadcast_add``.
+
+        x    : !forge.tensor<Sx>
+        y    : !forge.tensor<Sy>
+        out  : !forge.tensor<broadcast(Sx, Sy)>
+    """
+
+    name = "forge.tensor.mul"
+    x = operand_def(TensorType)
+    y = operand_def(TensorType)
+    out = result_def(TensorType)
+
+    traits = traits_def(Pure(), NoMemoryEffect())
+
+    assembly_format = "$x `,` $y attr-dict `:` `(` type($x) `,` type($y) `)` `->` type($out)"
+
+    def __init__(self, x, y):
+        super().__init__(operands=[x, y])
+
+    def verify_(self) -> None:
+        x_type = _check_tensor(self.x, "forge.tensor.mul operand 'x'")
+        y_type = _check_tensor(self.y, "forge.tensor.mul operand 'y'")
+        out_type = _check_tensor(self.out, "forge.tensor.mul result")
+        if x_type.dtype != y_type.dtype:
+            raise VerifyException(
+                f"forge.tensor.mul operand dtypes must match: {x_type.dtype} vs {y_type.dtype}"
+            )
+        if out_type.dtype != x_type.dtype:
+            raise VerifyException(
+                "forge.tensor.mul result dtype must match operand: "
+                f"{out_type.dtype} vs {x_type.dtype}"
+            )
+        expected_out = _broadcast_shape(_static_shape(x_type), _static_shape(y_type))
+        if expected_out is None:
+            raise VerifyException(
+                "forge.tensor.mul operand shapes are not broadcastable: "
+                f"{_static_shape(x_type)} vs {_static_shape(y_type)}"
+            )
+        if _static_shape(out_type) != expected_out:
+            raise VerifyException(
+                f"forge.tensor.mul result shape mismatch: got "
+                f"{_static_shape(out_type)}, expected {expected_out}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Transpose op
+# ---------------------------------------------------------------------------
+
+
+@irdl_op_definition
+class TransposeOp(IRDLOperation):
+    """
+    `forge.tensor.transpose` — permute dimensions.
+
+        x   : !forge.tensor<Sx>
+        out : !forge.tensor<[Sx[p] for p in permutation]>
+
+    The required ``permutation`` property is an array of integer
+    attributes and must be a permutation of ``range(rank(x))``.
+    """
+
+    name = "forge.tensor.transpose"
+    permutation = prop_def(ArrayAttr)
+    x = operand_def(TensorType)
+    out = result_def(TensorType)
+
+    traits = traits_def(Pure(), NoMemoryEffect())
+
+    irdl_options = (ParsePropInAttrDict(),)
+    assembly_format = "$x attr-dict `:` `(` type($x) `)` `->` type($out)"
+
+    def __init__(self, x, permutation: Sequence[int]):
+        super().__init__(
+            operands=[x],
+            properties={
+                "permutation": ArrayAttr([IntAttr(int(dim)) for dim in permutation]),
+            },
+        )
+
+    def permutation_dims(self) -> tuple[int, ...]:
+        dims: list[int] = []
+        for entry in self.permutation.data:
+            if not isinstance(entry, IntAttr):
+                raise VerifyException(
+                    "forge.tensor.transpose permutation must contain only integers"
+                )
+            dims.append(int(entry.data))
+        return tuple(dims)
+
+    def verify_(self) -> None:
+        x_type = _check_tensor(self.x, "forge.tensor.transpose operand 'x'")
+        out_type = _check_tensor(self.out, "forge.tensor.transpose result")
+        if x_type.dtype != out_type.dtype:
+            raise VerifyException(
+                "forge.tensor.transpose result dtype must match input: "
+                f"{out_type.dtype} vs {x_type.dtype}"
+            )
+        x_shape = _static_shape(x_type)
+        dims = self.permutation_dims()
+        if sorted(dims) != list(range(len(x_shape))):
+            raise VerifyException(
+                "forge.tensor.transpose permutation must be a permutation of "
+                f"range({len(x_shape)}), got {dims}"
+            )
+        expected = tuple(x_shape[dim] for dim in dims)
+        if _static_shape(out_type) != expected:
+            raise VerifyException(
+                "forge.tensor.transpose result shape mismatch: "
+                f"got {_static_shape(out_type)}, expected {expected}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Select op
+# ---------------------------------------------------------------------------
+
+
+@irdl_op_definition
+class SelectOp(IRDLOperation):
+    """
+    `forge.tensor.select` — take one index along ``dim`` and drop that dim.
+
+        x   : !forge.tensor<S...xNx...>
+        out : !forge.tensor<S without dim>
+
+    This is the tensor form of PyTorch's ``x[i]`` / ``aten.select.int``.
+    Slicing that keeps the dimension is not modelled here.
+    """
+
+    name = "forge.tensor.select"
+    dim = prop_def(IntAttr)
+    index = prop_def(IntAttr)
+    x = operand_def(TensorType)
+    out = result_def(TensorType)
+
+    traits = traits_def(Pure(), NoMemoryEffect())
+
+    irdl_options = (ParsePropInAttrDict(),)
+    assembly_format = "$x attr-dict `:` `(` type($x) `)` `->` type($out)"
+
+    def __init__(self, x, dim: int, index: int):
+        super().__init__(
+            operands=[x],
+            properties={
+                "dim": IntAttr(int(dim)),
+                "index": IntAttr(int(index)),
+            },
+        )
+
+    def verify_(self) -> None:
+        x_type = _check_tensor(self.x, "forge.tensor.select operand 'x'")
+        out_type = _check_tensor(self.out, "forge.tensor.select result")
+        if x_type.dtype != out_type.dtype:
+            raise VerifyException(
+                "forge.tensor.select result dtype must match input: "
+                f"{out_type.dtype} vs {x_type.dtype}"
+            )
+        x_shape = _static_shape(x_type)
+        dim = int(self.dim.data)
+        if not (-len(x_shape) <= dim < len(x_shape)):
+            raise VerifyException(
+                f"forge.tensor.select dim {dim} is out of range for rank {len(x_shape)}"
+            )
+        dim = dim + len(x_shape) if dim < 0 else dim
+        index = int(self.index.data)
+        if x_shape[dim] >= 0 and not (0 <= index < x_shape[dim]):
+            raise VerifyException(
+                f"forge.tensor.select index {index} is out of range for dim {dim} "
+                f"with size {x_shape[dim]}"
+            )
+        expected = x_shape[:dim] + x_shape[dim + 1 :]
+        if _static_shape(out_type) != expected:
+            raise VerifyException(
+                "forge.tensor.select result shape mismatch: "
+                f"got {_static_shape(out_type)}, expected {expected}"
+            )
+        if not isinstance(self.dim.data, int) or not isinstance(self.index.data, int):
+            raise VerifyException("forge.tensor.select dim and index must be integers")
+
+
+# ---------------------------------------------------------------------------
 # Reshape op
 # ---------------------------------------------------------------------------
 
@@ -782,6 +1012,10 @@ TensorDialect = Dialect(
         GemmOp,
         FusedEpilogueOp,
         BroadcastAddOp,
+        MulOp,
+        ReluOp,
+        TransposeOp,
+        SelectOp,
         GeluOp,
         LayerNormOp,
         SoftmaxOp,

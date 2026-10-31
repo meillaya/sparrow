@@ -7,10 +7,10 @@ silently picks a wrong backend.
 
 Coverage (Task 4 acceptance = 4 tests; we ship exactly those 4):
 
-  * Triton supports seven of the forge.tensor ops (gemm,
-    fused_epilogue, broadcast_add, gelu, layer_norm, softmax, sdpa) but
-    no async execution. fp32 only. ``reshape`` has no dialect op and is
-    not listed.
+  * Triton supports every forge.tensor op that has a CPU kernel
+    (gemm, fused_epilogue, broadcast_add, mul, relu, transpose, select,
+    reshape, gelu, layer_norm, softmax, sdpa) but no async execution.
+    fp32 only.
   * Astra does NOT support layer_norm / softmax / sdpa (the microcode
     ISA lacks them).
   * MicroGPU does NOT support gemm, fused_epilogue, sdpa, or reshape
@@ -31,7 +31,7 @@ from forge_torch.capabilities import (
 
 
 def test_triton_supports_the_lowerable_tensor_ops() -> None:
-    """Triton-CPU lists the seven ops that have a dialect definition.
+    """Triton-CPU lists every op that has a dialect definition and CPU kernel.
 
     A capability is not a lowering guarantee; the partitioner also
     consults ``COMPILER_LOWERINGS``. ``supports_async_execution=False``
@@ -41,6 +41,11 @@ def test_triton_supports_the_lowerable_tensor_ops() -> None:
         "forge.tensor.gemm",
         "forge.tensor.fused_epilogue",
         "forge.tensor.broadcast_add",
+        "forge.tensor.mul",
+        "forge.tensor.relu",
+        "forge.tensor.transpose",
+        "forge.tensor.select",
+        "forge.tensor.reshape",
         "forge.tensor.gelu",
         "forge.tensor.layer_norm",
         "forge.tensor.softmax",

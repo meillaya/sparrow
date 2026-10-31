@@ -11,11 +11,11 @@ reference CPU executor.
 It is a research-scale stack for compiler and runtime engineers who need to
 read every layer.
 
-Version 0.2.0 is a baseline. The frontend imports and caches graphs, lowers
-supported tensor graphs to an execution plan, and runs that plan through
-ForgeRT when the pybind11 module is built. The fused MLP keeps a native fast
-path. Graphs outside the CPU kernel registry fall back to eager and record why
-in `planning_error`.
+Version 0.2.0 is a baseline. The frontend imports and caches graphs (including
+ordinary `nn.Linear` parameters, lifted into plan inputs), lowers supported
+tensor graphs to an execution plan, and runs that plan through ForgeRT when the
+pybind11 module is built. The fused MLP keeps a native fast path. Graphs outside
+the CPU kernel registry fall back to eager and record why in `planning_error`.
 [docs/SPEC.md](docs/SPEC.md) states each contract and marks each one met,
 partial, or gap; [docs/AUDIT.md](docs/AUDIT.md) records the evidence and the
 remediation order.
@@ -76,7 +76,7 @@ eager.
 
 | Backend | Implemented | Limit |
 | --- | --- | --- |
-| CPU reference | fp32 kernels for gemm, add, GELU, softmax, layer norm, attention, reshape | Static shapes; naive loops |
+| CPU reference | fp32 kernels for gemm, add, mul, relu, GELU, softmax, layer norm, attention, transpose, select, reshape | Static shapes; naive loops |
 | Triton-CPU | fp32 fused GEMM, bias, and GELU C++ kernel, provider | 2D input, one output |
 | Astra-sim | 64-bit microcode ISA, assembler, functional and timing simulators, provider | 16x16 tile; codegen is not usable |
 | MicroGPU-sim | 16-bit SIMT ISA, assembler, interpreter, provider | No lowering pass; one input |

@@ -176,31 +176,41 @@ tensor output in the tuple Dynamo expects.
 
 ### 4.2 Capture
 
-The frontend captures with `torch.fx.symbolic_trace`. The captured graph MUST
-contain no `get_attr` node. A graph with `get_attr` raises
-`NotImplementedError` naming the unsupported node. A `call_module` node is
-skipped by the importer, which can leave a later consumer without an SSA value
-and raise `KeyError`. A model that stores weights as module attributes, such as
-a standard `nn.Linear`, is outside the supported set. The `TransformerBlock`
-fixture works around this by binding weights in a closure.
+The frontend captures with `torch.fx.symbolic_trace` (or accepts a graph
+already captured by Dynamo / `make_fx`). Parameter and buffer tensors carried
+by `get_attr` nodes are lifted into extra function arguments; the compiled
+callable binds them to the live module tensors at invocation time. Shape
+arithmetic (`x.shape`, `.size`, `.dim`, integer `getitem`) is folded from the
+example inputs, so `B, S, D = x.shape` produces concrete dimensions.
+
+`call_module` nodes are lowered for `nn.Linear` (transposed gemm plus bias) and
+`nn.LayerNorm` (layer-norm with the module's weight, bias, and epsilon). Any
+other module class raises `NotImplementedError` naming the target. A
+`get_attr` that is not a tensor, or a shape the example inputs cannot resolve,
+also raises a named error.
 
 ### 4.3 Supported operations
 
 | PyTorch target | Forge op | Notes |
 | --- | --- | --- |
-| `aten.mm`, `aten.matmul` | `forge.graph.matmul` | 2D or batched, dtype must match |
+| `aten.mm`, `aten.matmul`, `aten.bmm` | `forge.graph.matmul` | 2D or batched, dtype must match |
+| `aten.addmm` | gemm + `broadcast_add` | Default `alpha=1, beta=1` only |
+| `aten.linear` | transposed gemm + `broadcast_add` | Bias is optional |
 | `aten.add` | `forge.graph.add` | NumPy broadcasting |
+| `aten.mul` | `forge.tensor.mul` | NumPy broadcasting |
+| `aten.relu` | `forge.tensor.relu` | Shape- and dtype-preserving |
 | `aten.gelu` | `forge.graph.gelu` | Exact or tanh approximation |
-| `aten.view`, `aten._unsafe_view` | `forge.graph.view` | No data movement; left in place by graph-to-tensor |
+| `aten.view`, `aten._unsafe_view`, `aten.reshape` | `forge.graph.view` | No data movement; lowered to tensor reshape |
+| `aten.permute`, `aten.transpose`, `aten.t` | `forge.tensor.transpose` | Dimension permutation |
+| `aten.select`, integer `getitem` | `forge.tensor.select` | Drops the selected dimension |
 | `aten.layer_norm` | `forge.tensor.layer_norm` | Emitted directly in the tensor dialect |
 | `aten.softmax` | `forge.tensor.softmax` | Emitted directly in the tensor dialect |
 | `aten.scaled_dot_product_attention` | `forge.tensor.scaled_dot_product_attention` | Emitted directly in the tensor dialect |
 
-The importer recognises `aten.relu`, `aten.silu`, `aten.mul`, `aten.reshape`,
-`aten.permute`, `aten.transpose`, `aten.sum`, `aten.mean`, `aten.bmm`, and
-`aten.baddbmm`, and raises `NotImplementedError` for them. The region detector
-and partitioner map `aten.relu` to `forge.tensor.gelu`, so the three mapping
-tables disagree. The importer table is authoritative for what can be imported.
+The canonical table lives in `forge_torch.ops`. The importer, region detector,
+partitioner, and capability check derive their mappings from it. `aten.silu`,
+`aten.sum`, `aten.mean`, `aten.baddbmm`, `aten.div`, and `aten.pow` remain
+recognised but not lowered, and raise `NotImplementedError` naming the op.
 
 ### 4.4 Dtypes and shapes
 
@@ -322,10 +332,10 @@ the full FX graph through `torch.fx.Interpreter`.
 | ID | Level | Requirement | Status |
 | --- | --- | --- | --- |
 | SPA-FE-01 | MUST | `compile()` capture the graph, import MLIR, consult the cache, and return a callable marked compiled | Met |
-| SPA-FE-02 | MUST | Capture use `torch.fx.symbolic_trace` and reject `get_attr` with a named error | Met |
+| SPA-FE-02 | MUST | Capture use `torch.fx.symbolic_trace`, lift `get_attr` parameters into plan inputs, and lower supported `call_module` nodes | Met |
 | SPA-FE-03 | MUST | An unsupported node raise a diagnostic that names the target | Partial (AUD-14) |
 | SPA-FE-04 | MUST | The importer emit MLIR that passes `ModuleOp.verify()` | Met |
-| SPA-FE-05 | MUST | The importer accept the seven op rows in 4.3 | Met |
+| SPA-FE-05 | MUST | The importer accept the op rows in 4.3 | Met |
 | SPA-FE-06 | MUST | A cache key include graph hash, target, arch, dtype, shape constraints, schedule, and compiler version | Met |
 | SPA-FE-07 | MUST | The cache path or artifact identity prevent a lookup from returning another key's artifact | Met |
 | SPA-FE-08 | MUST | A dynamic bucket include the graph identity, target, arch, and dtype | Met |
@@ -390,7 +400,7 @@ the verifier SHOULD reject it.
 | Dialect | Operations | Types and attributes |
 | --- | --- | --- |
 | `forge.graph` | `matmul`, `add`, `gelu`, `view`, `symbolic_guard` | `!forge.tensor`, `#forge.dtype`, `#forge.symbolic_constraint` |
-| `forge.tensor` | `gemm`, `fused_epilogue`, `broadcast_add`, `gelu`, `layer_norm`, `softmax`, `scaled_dot_product_attention` | `#forge.activation` (gelu, relu, silu, none) |
+| `forge.tensor` | `gemm`, `fused_epilogue`, `broadcast_add`, `mul`, `relu`, `transpose`, `select`, `gelu`, `layer_norm`, `softmax`, `scaled_dot_product_attention`, `reshape` | `#forge.activation` (gelu, relu, silu, none) |
 | `forge.schedule` | `tiled_gemm` | `#forge.tile_shape<MxNxK>`, `#forge.loop_order`, `#forge.pipeline_stages` |
 | `astra` | `compute.matmul`, `microcode.dma_load`, `microcode.dma_store`, `microcode.matmul`, `microcode.vector_gelu` | `!astra.ptr` (dram, sram0, sram1, scratch) |
 | `microgpu` | `load_global`, `store_global`, `add`, `mul`, `sigmoid`, `return` | `i32` operands and results |
@@ -405,7 +415,10 @@ static. The matmul and add verifiers do not check the result dtype, so an
 `forge.tensor.gemm` carries `transpose_a` and `transpose_b`.
 `fused_epilogue` carries an activation. `gelu` carries a boolean approximation
 flag. `layer_norm` carries epsilon. `softmax` carries a dimension. SDPA carries
-`num_heads`. All shape checks map a symbolic dimension to -1.
+`num_heads`. `transpose` carries a permutation and checks that it covers
+`range(rank)`. `select` carries a dimension and index and drops the selected
+dimension; both are range-checked when the shape is static. All shape checks
+map a symbolic dimension to -1.
 
 ### 5.4 Pass pipeline
 
@@ -413,7 +426,7 @@ flag. `layer_norm` carries epsilon. `softmax` carries a dimension. SDPA carries
 | --- | --- |
 | `graph-to-tensor` | One-to-one rewrite of matmul to gemm, add to broadcast_add, gelu to gelu. Leaves `view` and `symbolic_guard` in place. Idempotent on tensor IR. |
 | `canonicalize` | Remove dead pure tensor ops and apply local simplifications. The custom DCE pattern documents a GELU-only subset, but the rewrite driver removes every trivially dead op first. |
-| `shape-inference` | Recompute result types for gemm, broadcast_add, gelu, and fused_epilogue from operand shapes. Symbols propagate unchanged. |
+| `shape-inference` | Recompute result types for gemm, broadcast_add, gelu, and fused_epilogue from operand shapes. Symbols propagate unchanged. The M3 movement ops arrive with their result types from the importer and pass through unchanged. |
 | `fuse` | Fold `broadcast_add` plus a bare gelu or relu `fused_epilogue` into one bias-bearing `fused_epilogue`. Requires a single-use gemm and crashes on a multi-use add. |
 | `tensor-to-astra` | Disabled in 0.2.0. The pass raises `VerifyException` because the dialect cannot represent SRAM addresses, the conversion cannot recover shapes after gemm lowering, and the 15-bit DMA immediate cannot carry real byte counts. |
 

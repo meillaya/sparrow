@@ -93,15 +93,15 @@ def test_op_mapping_dtype_table():
 
 
 def test_op_mapping_unsupported_aten_op_raises():
-    """Encountering ``aten.relu`` produces a NotImplementedError naming the op."""
+    """Encountering ``aten.silu`` produces a NotImplementedError naming the op."""
 
-    class HasRelu(torch.nn.Module):
+    class HasSilu(torch.nn.Module):
         def forward(self, x):
-            return torch.relu(x)
+            return torch.nn.functional.silu(x)
 
-    gm = make_fx(HasRelu(), tracing_mode="fake")(torch.randn(2, 3))
+    gm = make_fx(HasSilu(), tracing_mode="fake")(torch.randn(2, 3))
     importer = FxImporter([torch.randn(2, 3)])
-    with pytest.raises(NotImplementedError, match="relu"):
+    with pytest.raises(NotImplementedError, match="silu"):
         importer.import_graph(gm)
 
 
@@ -199,3 +199,132 @@ def test_sdpa_importer():
 
     rounded = _module_roundtrip(mlir)
     assert "forge.tensor.scaled_dot_product_attention" in rounded
+
+
+def test_elementwise_and_movement_importer():
+    """relu / mul / permute are emitted as tensor-dialect ops."""
+
+    class Elementwise(torch.nn.Module):
+        def forward(self, x, scale):
+            return torch.relu(x * scale).permute(0, 2, 1)
+
+    x = torch.randn(2, 3, 4)
+    scale = torch.randn(4)
+    gm = torch.fx.symbolic_trace(Elementwise())
+    mlir = FxImporter([x, scale]).import_graph(gm)
+
+    assert "forge.tensor.mul" in mlir
+    assert "forge.tensor.relu" in mlir
+    assert "forge.tensor.transpose" in mlir
+    rounded = _module_roundtrip(mlir)
+    assert "forge.tensor.transpose" in rounded
+
+
+def test_addmm_and_bmm_importer():
+    """aten.addmm and aten.bmm both lower to gemm-shaped IR."""
+
+    class Addmm(torch.nn.Module):
+        def forward(self, bias, a, b):
+            return torch.addmm(bias, a, b)
+
+    class Bmm(torch.nn.Module):
+        def forward(self, a, b):
+            return torch.bmm(a, b)
+
+    bias, a, b = torch.randn(5), torch.randn(4, 8), torch.randn(8, 5)
+    mlir = FxImporter([bias, a, b]).import_graph(torch.fx.symbolic_trace(Addmm()))
+    assert "forge.tensor.gemm" in mlir
+    assert "forge.tensor.broadcast_add" in mlir
+
+    a3, b3 = torch.randn(2, 4, 8), torch.randn(2, 8, 5)
+    mlir = FxImporter([a3, b3]).import_graph(torch.fx.symbolic_trace(Bmm()))
+    assert "forge.graph.matmul" in mlir
+    assert "!forge.tensor<2x4x5xf32>" in mlir
+
+
+def test_get_attr_parameters_are_lifted():
+    """``get_attr`` parameter tensors become extra function arguments."""
+
+    class AttrLinear(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.randn(4, 8))
+            self.bias = torch.nn.Parameter(torch.randn(4))
+
+        def forward(self, x):
+            return torch.nn.functional.linear(x, self.weight, self.bias)
+
+    x = torch.randn(2, 8)
+    gm = torch.fx.symbolic_trace(AttrLinear())
+    importer = FxImporter([x])
+    mlir = importer.import_graph(gm)
+
+    assert len(importer.lifted_tensors) == 2
+    assert importer.lifted_tensors[0].shape == (4, 8)
+    assert importer.lifted_tensors[1].shape == (4,)
+    assert "forge.tensor.gemm" in mlir
+    assert "forge.tensor.broadcast_add" in mlir
+
+
+def test_call_module_linear_and_layer_norm():
+    """Normal nn.Linear / nn.LayerNorm modules are lowered, not skipped."""
+
+    class Modules(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc = torch.nn.Linear(8, 4)
+            self.ln = torch.nn.LayerNorm(4)
+
+        def forward(self, x):
+            return self.ln(self.fc(x))
+
+    x = torch.randn(2, 8)
+    gm = torch.fx.symbolic_trace(Modules())
+    importer = FxImporter([x])
+    mlir = importer.import_graph(gm)
+
+    assert len(importer.lifted_tensors) == 4
+    assert "forge.tensor.gemm" in mlir
+    assert "forge.tensor.layer_norm" in mlir
+    rounded = _module_roundtrip(mlir)
+    assert "forge.tensor.layer_norm" in rounded
+
+
+def test_shape_arithmetic_folds_to_concrete_dims():
+    """``B, S, D = x.shape`` is resolved from the example inputs."""
+
+    class ShapeReshape(torch.nn.Module):
+        def forward(self, x):
+            b, s, d = x.shape
+            return x.reshape(b, s * d)
+
+    x = torch.randn(2, 8, 4)
+    mlir = FxImporter([x]).import_graph(torch.fx.symbolic_trace(ShapeReshape()))
+    assert "!forge.tensor<2x32xf32>" in mlir
+    assert "getitem" not in mlir
+
+
+def test_addmm_rejects_non_default_scalars():
+    """Ignoring alpha/beta would silently produce wrong numbers, so reject."""
+
+    class ScaledAddmm(torch.nn.Module):
+        def forward(self, bias, a, b):
+            return torch.addmm(bias, a, b, beta=0.5)
+
+    with pytest.raises(NotImplementedError, match="beta"):
+        FxImporter([torch.randn(5), torch.randn(4, 8), torch.randn(8, 5)]).import_graph(
+            torch.fx.symbolic_trace(ScaledAddmm())
+        )
+
+
+def test_make_fx_linear_lifts_get_attr_constants():
+    """make_fx stores parameters as ``get_attr`` constants; the importer lifts them."""
+    model = torch.nn.Linear(8, 4)
+    x = torch.randn(2, 8)
+    gm = make_fx(model)(x)
+    importer = FxImporter([x])
+    mlir = importer.import_graph(gm)
+
+    assert len(importer.lifted_tensors) == 2
+    assert "forge.tensor.gemm" in mlir
+    assert "forge.tensor.broadcast_add" in mlir
