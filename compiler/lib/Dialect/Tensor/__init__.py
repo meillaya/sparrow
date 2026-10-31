@@ -411,6 +411,63 @@ class GeluOp(IRDLOperation):
 
 
 # ---------------------------------------------------------------------------
+# Reshape op
+# ---------------------------------------------------------------------------
+
+
+@irdl_op_definition
+class ReshapeOp(IRDLOperation):
+    """
+    `forge.tensor.reshape` — reshape with no data movement.
+
+    The op is a view in the source language and a contiguous copy at the
+    runtime boundary. It exists so the planner has an explicit node for
+    ``forge.graph.view`` instead of leaving a graph-dialect op in tensor
+    IR.
+
+        x   : !forge.tensor<Sx>
+        out : !forge.tensor<Sy>   where prod(Sx) == prod(Sy)
+    """
+
+    name = "forge.tensor.reshape"
+    x = operand_def(TensorType)
+    out = result_def(TensorType)
+
+    traits = traits_def(Pure(), NoMemoryEffect())
+
+    assembly_format = "$x attr-dict `:` `(` type($x) `)` `->` type($out)"
+
+    def __init__(self, x):
+        super().__init__(operands=[x])
+
+    def verify_(self) -> None:
+        x_type = _check_tensor(self.x, "forge.tensor.reshape operand 'x'")
+        out_type = _check_tensor(self.out, "forge.tensor.reshape result")
+        if x_type.dtype != out_type.dtype:
+            raise VerifyException(
+                "forge.tensor.reshape result dtype must match input: "
+                f"{out_type.dtype} vs {x_type.dtype}"
+            )
+        x_shape = _static_shape(x_type)
+        out_shape = _static_shape(out_type)
+        if any(dim < 0 for dim in x_shape) or any(dim < 0 for dim in out_shape):
+            raise VerifyException(
+                f"forge.tensor.reshape requires static shapes; got {x_shape} -> {out_shape}"
+            )
+        x_elements = 1
+        for dim in x_shape:
+            x_elements *= dim
+        out_elements = 1
+        for dim in out_shape:
+            out_elements *= dim
+        if x_elements != out_elements:
+            raise VerifyException(
+                "forge.tensor.reshape element count must match: "
+                f"{x_shape} has {x_elements}, {out_shape} has {out_elements}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Layer norm op
 # ---------------------------------------------------------------------------
 
@@ -725,6 +782,7 @@ TensorDialect = Dialect(
         LayerNormOp,
         SoftmaxOp,
         ScaledDotProductAttentionOp,
+        ReshapeOp,
     ],
     [
         ActivationAttr,

@@ -8,7 +8,7 @@
 # regions as the home for `gemm + bias + activation` style coalescing,
 # which would be a separate pass operating on the lowered IR.
 #
-# This module wires four xDSL `RewritePattern`s (one per supported graph op)
+# This module wires five xDSL `RewritePattern`s (one per supported graph op)
 # into a `GreedyRewritePatternApplier` and drives them through a
 # `PatternRewriteWalker`, mounted on a `GraphToTensorPass` `ModulePass`.
 #
@@ -28,9 +28,7 @@
 #         and elides the property entirely via `ParsePropInAttrDict`.)
 #
 #     forge.graph.view %x
-#         → left untouched (the FusedMLP vertical slice does not use
-#         `view`; emitting `forge.tensor.reshape` would require a new
-#         op + verification, which is not part of the shipped scope.)
+#         → forge.tensor.reshape %x
 #
 # Idempotency: no `RewritePattern` matches a `forge.tensor.*` op, so the pass
 # is a no-op when fed already-lowered IR. This is exercised explicitly by
@@ -65,6 +63,7 @@ from compiler.lib.Dialect.Graph import (
 from compiler.lib.Dialect.Tensor import (
     BroadcastAddOp,
     GemmOp,
+    ReshapeOp,
 )
 from compiler.lib.Dialect.Tensor import (
     GeluOp as TensorGeluOp,
@@ -164,21 +163,22 @@ class GeluToGeluPattern(RewritePattern):
         rewriter.replace_op(op, new_op)
 
 
-class ViewPassThroughPattern(RewritePattern):
-    """Leave ``forge.graph.view`` alone in the shipped scope.
+class ViewToReshapePattern(RewritePattern):
+    """Rewrite ``forge.graph.view`` to ``forge.tensor.reshape``.
 
-    The FusedMLP vertical slice never emits ``view``; lowering it would
-    require either a brand-new ``forge.tensor.reshape`` op (with its own
-    verifier and shape-inference story) or folding the reshape into a
-    downstream ``fused_epilogue``. The shipped pass keeps the op
-    untouched. This pattern is intentionally empty — its presence in the
-    applier signals intent (we considered the op and chose not to lower
-    it) and keeps the applier shape consistent.
+    The source op is a view. The tensor op is the planner's explicit
+    reshape node; the CPU runtime performs a contiguous copy.
     """
 
     @op_type_rewrite_pattern
     def match_and_rewrite(self, op: ViewOp, rewriter: PatternRewriter, /) -> None:
-        return
+        rewriter.replace_op(
+            op,
+            ReshapeOp.create(
+                operands=[op.x],
+                result_types=[op.out.type],
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +206,7 @@ class GraphToTensorPass(ModulePass):
                     MatmulToGemmPattern(),
                     AddToBroadcastAddPattern(),
                     GeluToGeluPattern(),
-                    ViewPassThroughPattern(),
+                    ViewToReshapePattern(),
                 ]
             ),
             # `apply_recursively=False` is the conservative choice for a
