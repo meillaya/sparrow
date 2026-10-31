@@ -1,4 +1,10 @@
-# Sparrow
+<br>
+<br>
+
+<h1 align="center">sparrow</h1>
+
+<br>
+<br>
 
 Sparrow is a PyTorch-to-MLIR compiler and C++ runtime for three CPU backends.
 It is a research-scale stack for compiler and runtime engineers who need to
