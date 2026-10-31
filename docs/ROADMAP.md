@@ -1,8 +1,8 @@
 # Sparrow roadmap
 
 The audit and [SPEC.md](SPEC.md) describe the contracts. This file tracks the
-remaining milestones from the completion plan. M1 through M4 are implemented;
-M5 through M7 are open.
+remaining milestones from the completion plan. M1 through M5 are implemented;
+M6 and M7 are open.
 
 ## Landed
 
@@ -59,18 +59,21 @@ M5 through M7 are open.
 - `compile_partitioned(config="A")` runs the CPU plan; B and C raise
   `NotImplementedError` naming the missing lowering until those backends pass.
 
-## Open
-
 ### M5: Astra v2
 
-- Add address and size attributes to the microcode ops, plus a vector add.
-- Build a layout pass with DRAM and SRAM offsets before conversion.
-- Chunk DMA under the 15-bit immediate and tile K with accumulation.
-- Define an artifact header that binds buffers to DRAM offsets.
-- Replace the reference program in the provider with a binary executor.
-- Generate words from IR, not regex.
-- Acceptance: compiler-generated 16x16 tiles pass K=4, K=512, and a K-tiled
-  case with bias.
+- `forge_torch.astra` walks lowered tensor IR, lays buffers out in DRAM and
+  SRAM, tiles K with accumulation, chunks DMA below the 15-bit immediate, and
+  emits a JSON artifact header binding every input to a DRAM offset.
+- The microcode ops carry address and size properties; `astra.microcode.
+  vector_add` adds elementwise and bias-broadcast adds. `MATMUL` accumulates
+  K tiles through the accumulator tile.
+- `AstraProvider` executes the artifact's words directly against simulated
+  DRAM and SRAM. The Python child process and base64 protocol are gone.
+- `emit_astra` parses IR and encodes dialect ops; the regex scraper is gone.
+- Acceptance: compiler-generated 16x16 tiles match eager for K=4, K=20, and
+  K=512 with bias and GELU.
+
+## Open
 
 ### M6: MicroGPU v2
 

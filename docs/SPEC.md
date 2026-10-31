@@ -403,7 +403,7 @@ the verifier SHOULD reject it.
 | `forge.graph` | `matmul`, `add`, `gelu`, `view`, `symbolic_guard` | `!forge.tensor`, `#forge.dtype`, `#forge.symbolic_constraint` |
 | `forge.tensor` | `gemm`, `fused_epilogue`, `broadcast_add`, `mul`, `relu`, `transpose`, `select`, `gelu`, `layer_norm`, `softmax`, `scaled_dot_product_attention`, `reshape` | `#forge.activation` (gelu, relu, silu, none) |
 | `forge.schedule` | `tiled_gemm` | `#forge.tile_shape<MxNxK>`, `#forge.loop_order`, `#forge.pipeline_stages` |
-| `astra` | `compute.matmul`, `microcode.dma_load`, `microcode.dma_store`, `microcode.matmul`, `microcode.vector_gelu` | `!astra.ptr` (dram, sram0, sram1, scratch) |
+| `astra` | `compute.matmul`, `microcode.dma_load`, `microcode.dma_store`, `microcode.matmul`, `microcode.vector_gelu`, `microcode.vector_add` | `!astra.ptr` (dram, sram0, sram1, scratch) |
 | `microgpu` | `load_global`, `store_global`, `add`, `mul`, `sigmoid`, `return` | `i32` operands and results |
 
 `forge.graph.matmul` checks that the operand dtypes match and infers the batch,
@@ -543,19 +543,39 @@ The microcode word is 64 bits, packed as four 16-bit fields:
 `opcode | reg_a | reg_b | imm_or_flags`. The final field is either a 15-bit
 immediate or 15 bits of flags; bit 15 marks the flags form. The opcodes are
 `NOP=0x00`, `DMA_LOAD=0x01`, `DMA_STORE=0x02`, `MATMUL=0x03`,
-`VECTOR_GELU=0x04`, and `HALT=0xFF`.
+`VECTOR_GELU=0x04`, `VECTOR_ADD=0x05`, `VECTOR_ADD_BROADCAST=0x06`, and
+`HALT=0xFF`.
 
-The timing model charges 4 cycles per DMA instruction, 16 per matmul, 4 per
-GELU, and 1 per NOP or HALT. It also tracks bytes resident in SRAM. It does not
-model bank conflicts, stalls, or overlap.
+The timing model charges 4 cycles per DMA or vector instruction, 16 per
+matmul, 4 per GELU, and 1 per NOP or HALT. It also tracks bytes resident in
+SRAM. It does not model bank conflicts, stalls, or overlap.
 
-The codegen path in `backends/astra/codegen/astra_codegen.py` scrapes textual
-IR with regular expressions. It hardcodes `SRAM[0]` and `DRAM[0]`, drops the
-M and N attributes, and always emits `elements=0` for GELU. It does not compile
-the IR it receives. The compiler pass is disabled in 0.2.0 and raises
-`VerifyException`. The provider accepts only the explicit
-`astra.reference.tile16` reference program; any other artifact returns error
-`2133`.
+Astra v2 lowering lives in `forge_torch.astra`. It walks verified tensor IR
+(no regex), lays buffers out in DRAM and SRAM, chunks every DMA below the
+15-bit immediate, tiles K through the accumulator with `MATMUL` plus
+`VECTOR_ADD`, applies the rank-1 bias with `VECTOR_ADD_BROADCAST`, and emits a
+JSON artifact header:
+
+```json
+{
+  "version": 2,
+  "entry_point": "astra.microcode.v2",
+  "dram_bytes": 1600,
+  "words": [281474976710672, 281543697235984],
+  "buffers": [
+    {"name": "x", "role": "input", "input_index": 0,
+     "dram_offset": 64, "byte_size": 256, "shape": [16, 4], "dtype": "f32"}
+  ],
+  "output": {"name": "y", "role": "output", "dram_offset": 0,
+             "byte_size": 1024, "shape": [16, 16], "dtype": "f32"}
+}
+```
+
+`AstraProvider` parses that header, binds each plan input to its DRAM offset,
+executes the instruction words against simulated DRAM and SRAM, and copies the
+output region back. There is no child process. The legacy `TensorToAstra`
+compiler pass remains disabled and raises a message pointing at
+`forge_torch.astra`.
 
 ### 6.4 MicroGPU-sim
 
@@ -608,13 +628,13 @@ the output arrays, aliases the caller inputs, and runs the scheduler.
 | --- | --- | --- | --- |
 | SPA-BE-01 | MUST | Every backend expose the seven capability fields | Met |
 | SPA-BE-02 | MUST | Triton-CPU compute fused GEMM, bias, and GELU for the documented shapes and return a `Result` | Met |
-| SPA-BE-03 | MUST | Astra-sim execute the microcode ISA on a 16x16 tile and return the stored tensor | Met |
+| SPA-BE-03 | MUST | Astra-sim execute a compiler-generated 16x16 tile artifact and return the stored tensor | Met |
 | SPA-BE-04 | MUST | MicroGPU-sim encode, decode, assemble, and interpret the 16-bit ISA | Met |
-| SPA-BE-05 | MUST | Every capability have a lowering path | Partial (narrowed, no lowerings) |
+| SPA-BE-05 | MUST | Every capability have a lowering path | Partial (CPU and single-tile Astra; Triton fused group; MicroGPU open) |
 | SPA-BE-06 | MUST | Backend artifacts carry target, entry point, binary, arguments, guards, and workspace | Met |
 | SPA-BE-07 | MUST | An unsupported dtype or shape return an `Error`, not a crash or a partial write | Met |
 | SPA-BE-08 | MUST | Simulators produce the same result for the same program and inputs | Met |
-| SPA-BE-09 | MUST | Codegen consume IR values and attributes, not textual regex matches | Gap (AUD-48) |
+| SPA-BE-09 | MUST | Codegen consume IR values and attributes, not textual regex matches | Met for CPU and Astra |
 | SPA-BE-10 | MUST | The MicroGPU backend have a tensor-to-microgpu conversion | Gap (AUD-36) |
 
 ## 7. Runtime
@@ -910,7 +930,7 @@ file in the repository and no sanitizer or coverage step.
 | Area | Requirements | Audit evidence | Effect |
 | --- | --- | --- | --- |
 | Execution | SPA-FE-09, SPA-FE-10, SPA-FE-17, SPA-FE-18 | AUD-07, AUD-08, AUD-13, AUD-37 | Native fused MLP and CPU plans cover supported ops; unsupported graphs fall back to eager; region assignments are labels |
-| Astra lowering | SPA-IR-13, SPA-BE-09, SPA-BE-10 | AUD-47 through AUD-50, AUD-36 | The CLI rejects the path; the dialect and simulator remain research code |
+| Astra lowering | SPA-IR-13, SPA-BE-09, SPA-BE-10 | AUD-47 through AUD-50, AUD-36 | `forge_torch.astra` lowers single 16x16 tiles to a binary artifact; wider shapes and the legacy pass remain open |
 | Capability parity | SPA-BE-05 | AUD-09 | The registry is narrowed and the lowering map is empty; the partitioner fails closed |
 | Report durability | SPA-FE-12 | AUD-46 | The report lives under the ignored cache root |
 | Test count | SPA-OPS-11 | AUD-34 | No reproducible count is published |

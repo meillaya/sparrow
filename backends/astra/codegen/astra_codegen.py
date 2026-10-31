@@ -1,72 +1,75 @@
-"""emit_astra — lower an Astra microcode region to instruction words.
+"""Lower Astra microcode IR to instruction words.
 
-The Phase 4 codegen is deliberately small: it discovers ``astra.microcode.*``
-operations in textual xDSL IR, preserves byte-count and ``k`` attributes that
-fit the current instruction word, and delegates packing to the assembler.
-
-Reference: spec §9 and Wave 11 Task 48.
+The codegen walks verified ``astra`` dialect operations and encodes each
+one with the assembler. It no longer scrapes textual IR with a regex:
+the input is a parsed ``ModuleOp`` and every address/size comes from the
+op's properties.
 """
 
 from __future__ import annotations
 
-import re
-from importlib import import_module
-from typing import Final, Protocol, runtime_checkable
+from xdsl.context import Context
+from xdsl.dialects.builtin import Builtin, ModuleOp
+from xdsl.dialects.func import Func as FuncDialect
+from xdsl.ir import Operation
+from xdsl.parser import Parser
 
-from compiler.lib.Dialect.Astra.microcode import OpCode
+from compiler.lib.Dialect.Astra import (
+    Astra,
+    ComputeMatmulOp,
+    MicrocodeDmaLoadOp,
+    MicrocodeDmaStoreOp,
+    MicrocodeMatmulOp,
+    MicrocodeVectorAddOp,
+    MicrocodeVectorGeluOp,
+)
+from compiler.lib.Dialect.Astra.assembler import assemble_from_dialect
 
-
-@runtime_checkable
-class _AssemblerApi(Protocol):
-    def assemble(self, text: str, /) -> list[int]: ...
-
-
-_assembler_module = import_module("compiler.lib.Dialect.Astra.assembler")
-if isinstance(_assembler_module, _AssemblerApi):
-    _ASSEMBLER: Final = _assembler_module
-else:
-    raise TypeError("Astra assembler module does not provide assemble(text)")
-
-
-_OP_RE: Final[re.Pattern[str]] = re.compile(r"\bastra\.microcode\.(?P<opcode>[a-z][a-z0-9_]*)\b")
-
-
-def _integer_attribute(line: str, name: str, default: int = 0) -> int:
-    match = re.search(
-        rf"\b{re.escape(name)}\s*=\s*(?:#builtin\.int<)?(?P<value>[0-9]+)>?",
-        line,
-    )
-    return default if match is None else int(match.group("value"))
+AstraOp = (
+    ComputeMatmulOp
+    | MicrocodeDmaLoadOp
+    | MicrocodeDmaStoreOp
+    | MicrocodeMatmulOp
+    | MicrocodeVectorGeluOp
+    | MicrocodeVectorAddOp
+)
 
 
-def _assembly_line(opcode: OpCode, region_line: str) -> str:
-    match opcode:
-        case OpCode.DMA_LOAD:
-            size = _integer_attribute(region_line, "bytes")
-            return f"DMA_LOAD dst=SRAM[0x0], src=DRAM[0x0], bytes={size}"
-        case OpCode.DMA_STORE:
-            size = _integer_attribute(region_line, "bytes")
-            return f"DMA_STORE dst=DRAM[0x0], src=SRAM[0x0], bytes={size}"
-        case OpCode.MATMUL:
-            k = _integer_attribute(region_line, "k")
-            return f"MATMUL a=SRAM[0x0], b=SRAM[0x0], k={k}"
-        case OpCode.VECTOR_GELU:
-            return "VECTOR_GELU dst=SRAM[0x0], src=SRAM[0x0], elements=0"
-        case OpCode.NOP | OpCode.HALT:
-            return opcode.name
+def _walk(operation: Operation):
+    yield operation
+    for region in operation.regions:
+        for block in region.blocks:
+            for nested in block.ops:
+                yield from _walk(nested)
+
+
+def emit_astra_module(module: ModuleOp) -> list[int]:
+    """Encode every Astra op in ``module`` in program order."""
+    operations: list[AstraOp] = []
+    for operation in _walk(module):
+        if isinstance(operation, AstraOp):
+            operations.append(operation)
+    return assemble_from_dialect(operations)
+
+
+def _context() -> Context:
+    context = Context(allow_unregistered=False)
+    context.load_dialect(Builtin)
+    context.load_dialect(FuncDialect)
+    context.load_dialect(Astra)
+    return context
 
 
 def emit_astra(region: str) -> list[int]:
-    """Emit one packed Astra instruction for each microcode op in ``region``."""
-    assembly_lines: list[str] = []
-    for line_number, line in enumerate(region.splitlines(), start=1):
-        for operation_match in _OP_RE.finditer(line):
-            opcode_name = operation_match.group("opcode").upper()
-            try:
-                opcode = OpCode[opcode_name]
-            except KeyError as exc:
-                raise ValueError(
-                    f"line {line_number}: unsupported astra.microcode.{opcode_name.lower()}"
-                ) from exc
-            assembly_lines.append(_assembly_line(opcode, line))
-    return _ASSEMBLER.assemble("\n".join(assembly_lines))
+    """Parse ``region`` as MLIR and encode its Astra operations.
+
+    Kept as the textual entry point used by the CLI and tests; the
+    parsing step is the only thing the string form adds. No regex is
+    involved in decoding operation fields.
+    """
+    module = Parser(_context(), region, "<astra-region>").parse_module()
+    module.verify()
+    return emit_astra_module(module)
+
+
+__all__ = ("emit_astra", "emit_astra_module")

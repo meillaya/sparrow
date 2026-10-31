@@ -25,6 +25,8 @@ CYCLE_TABLE: Final[dict[OpCode, int]] = {
     OpCode.DMA_STORE: 4,
     OpCode.MATMUL: 16,
     OpCode.VECTOR_GELU: 4,
+    OpCode.VECTOR_ADD: 4,
+    OpCode.VECTOR_ADD_BROADCAST: 4,
     OpCode.NOP: 1,
     OpCode.HALT: 1,
 }
@@ -82,7 +84,7 @@ def _stall_reason(opcode: OpCode) -> StallReason:
     match opcode:
         case OpCode.DMA_LOAD | OpCode.DMA_STORE:
             return StallReason.DMA
-        case OpCode.MATMUL | OpCode.VECTOR_GELU:
+        case OpCode.MATMUL | OpCode.VECTOR_GELU | OpCode.VECTOR_ADD | OpCode.VECTOR_ADD_BROADCAST:
             return StallReason.COMPUTE
         case OpCode.NOP | OpCode.HALT:
             return StallReason.NONE
@@ -139,6 +141,10 @@ def run_timing(
                 vector_bytes = instruction.imm * _FLOAT_BYTES
                 residency.free(instruction.reg_b, vector_bytes)
                 residency.write(instruction.reg_a, vector_bytes)
+            case OpCode.VECTOR_ADD:
+                active_compute_cycles += cycles
+            case OpCode.VECTOR_ADD_BROADCAST:
+                active_compute_cycles += cycles
             case OpCode.NOP:
                 pass
             case OpCode.HALT:

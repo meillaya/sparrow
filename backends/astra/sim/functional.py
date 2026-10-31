@@ -99,6 +99,40 @@ def run_functional(
                 ).reshape(k, TILE_DIM)
                 product = (lhs @ rhs).astype(np.float32).tobytes()
                 sram_buffer[lhs_start : lhs_start + TILE_BYTES] = product
+            case OpCode.VECTOR_ADD:
+                count = instruction.imm
+                source = instruction.reg_b
+                destination = instruction.reg_a
+                values = np.frombuffer(
+                    sram_buffer,
+                    dtype=np.float32,
+                    count=count,
+                    offset=source,
+                )
+                accum = np.frombuffer(
+                    sram_buffer,
+                    dtype=np.float32,
+                    count=count,
+                    offset=destination,
+                )
+                accum += values
+            case OpCode.VECTOR_ADD_BROADCAST:
+                count = instruction.imm
+                source = instruction.reg_b
+                destination = instruction.reg_a
+                values = np.frombuffer(
+                    sram_buffer,
+                    dtype=np.float32,
+                    count=TILE_DIM,
+                    offset=source,
+                )
+                accum = np.frombuffer(
+                    sram_buffer,
+                    dtype=np.float32,
+                    count=count,
+                    offset=destination,
+                )
+                accum += values[np.arange(count) % TILE_DIM]
             case OpCode.VECTOR_GELU:
                 count = instruction.imm
                 source = instruction.reg_b

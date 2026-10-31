@@ -41,7 +41,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from xdsl.dialects.builtin import IntAttr, IntegerType
+from xdsl.dialects.builtin import BoolAttr, IntAttr, IntegerType
 from xdsl.ir import (
     Attribute,
     Dialect,
@@ -57,6 +57,7 @@ from xdsl.irdl import (
     irdl_op_definition,
     operand_def,
     opt_operand_def,
+    opt_prop_def,
     prop_def,
     result_def,
 )
@@ -302,6 +303,8 @@ class MicrocodeDmaLoadOp(IRDLOperation):
 
     name = "astra.microcode.dma_load"
     bytes = prop_def(IntAttr)
+    dram_offset = opt_prop_def(IntAttr, default_value=IntAttr(0))
+    sram_offset = opt_prop_def(IntAttr, default_value=IntAttr(0))
     dram_ptr = operand_def(IntegerType)
     sram_ptr = result_def(PtrType)
 
@@ -313,11 +316,22 @@ class MicrocodeDmaLoadOp(IRDLOperation):
         dram_ptr: object,
         sram_ptr_type: PtrType,
         bytes: int | IntAttr,
+        *,
+        dram_offset: int | IntAttr = 0,
+        sram_offset: int | IntAttr = 0,
     ) -> None:
         super().__init__(
             operands=[dram_ptr],
             result_types=[sram_ptr_type],
-            properties={"bytes": IntAttr(bytes) if isinstance(bytes, int) else bytes},
+            properties={
+                "bytes": IntAttr(bytes) if isinstance(bytes, int) else bytes,
+                "dram_offset": IntAttr(dram_offset)
+                if isinstance(dram_offset, int)
+                else dram_offset,
+                "sram_offset": IntAttr(sram_offset)
+                if isinstance(sram_offset, int)
+                else sram_offset,
+            },
         )
 
     def verify_(self) -> None:
@@ -348,6 +362,8 @@ class MicrocodeDmaStoreOp(IRDLOperation):
 
     name = "astra.microcode.dma_store"
     bytes = prop_def(IntAttr)
+    dram_offset = opt_prop_def(IntAttr, default_value=IntAttr(0))
+    sram_offset = opt_prop_def(IntAttr, default_value=IntAttr(0))
     sram_ptr = operand_def(PtrType)
     dram_ptr = result_def(IntegerType)
 
@@ -359,11 +375,22 @@ class MicrocodeDmaStoreOp(IRDLOperation):
         sram_ptr: object,
         dram_ptr_type: IntegerType,
         bytes: int | IntAttr,
+        *,
+        dram_offset: int | IntAttr = 0,
+        sram_offset: int | IntAttr = 0,
     ) -> None:
         super().__init__(
             operands=[sram_ptr],
             result_types=[dram_ptr_type],
-            properties={"bytes": IntAttr(bytes) if isinstance(bytes, int) else bytes},
+            properties={
+                "bytes": IntAttr(bytes) if isinstance(bytes, int) else bytes,
+                "dram_offset": IntAttr(dram_offset)
+                if isinstance(dram_offset, int)
+                else dram_offset,
+                "sram_offset": IntAttr(sram_offset)
+                if isinstance(sram_offset, int)
+                else sram_offset,
+            },
         )
 
     def verify_(self) -> None:
@@ -404,6 +431,8 @@ class MicrocodeMatmulOp(IRDLOperation):
     m = prop_def(IntAttr)
     n = prop_def(IntAttr)
     k = prop_def(IntAttr)
+    a_offset = opt_prop_def(IntAttr, default_value=IntAttr(0))
+    b_offset = opt_prop_def(IntAttr, default_value=IntAttr(0))
     sram_a = operand_def(PtrType)
     sram_b = operand_def(PtrType)
     bias = opt_operand_def(PtrType)
@@ -424,6 +453,9 @@ class MicrocodeMatmulOp(IRDLOperation):
         n: int | IntAttr,
         k: int | IntAttr,
         bias: object | None = None,
+        *,
+        a_offset: int | IntAttr = 0,
+        b_offset: int | IntAttr = 0,
     ) -> None:
         operands = [sram_a, sram_b]
         if bias is not None:
@@ -435,6 +467,8 @@ class MicrocodeMatmulOp(IRDLOperation):
                 "m": IntAttr(m) if isinstance(m, int) else m,
                 "n": IntAttr(n) if isinstance(n, int) else n,
                 "k": IntAttr(k) if isinstance(k, int) else k,
+                "a_offset": IntAttr(a_offset) if isinstance(a_offset, int) else a_offset,
+                "b_offset": IntAttr(b_offset) if isinstance(b_offset, int) else b_offset,
             },
         )
 
@@ -480,15 +514,32 @@ class MicrocodeVectorGeluOp(IRDLOperation):
     """
 
     name = "astra.microcode.vector_gelu"
+    elements = opt_prop_def(IntAttr, default_value=IntAttr(0))
+    src_offset = opt_prop_def(IntAttr, default_value=IntAttr(0))
+    dst_offset = opt_prop_def(IntAttr, default_value=IntAttr(0))
     sram_acc = operand_def(PtrType)
     out = result_def(PtrType)
 
+    irdl_options = (ParsePropInAttrDict(),)
     assembly_format = "$sram_acc attr-dict `:` `(` type($sram_acc) `)` `->` type($out)"
 
-    def __init__(self, sram_acc: object, out_type: PtrType) -> None:
+    def __init__(
+        self,
+        sram_acc: object,
+        out_type: PtrType,
+        *,
+        elements: int | IntAttr = 0,
+        src_offset: int | IntAttr = 0,
+        dst_offset: int | IntAttr = 0,
+    ) -> None:
         super().__init__(
             operands=[sram_acc],
             result_types=[out_type],
+            properties={
+                "elements": IntAttr(elements) if isinstance(elements, int) else elements,
+                "src_offset": IntAttr(src_offset) if isinstance(src_offset, int) else src_offset,
+                "dst_offset": IntAttr(dst_offset) if isinstance(dst_offset, int) else dst_offset,
+            },
         )
 
     def verify_(self) -> None:
@@ -507,6 +558,75 @@ class MicrocodeVectorGeluOp(IRDLOperation):
 
 
 # ---------------------------------------------------------------------------
+# astra.microcode.vector_add — elementwise or bias-broadcast add
+# ---------------------------------------------------------------------------
+
+
+@irdl_op_definition
+class MicrocodeVectorAddOp(IRDLOperation):
+    """``astra.microcode.vector_add`` — add a vector into a sram tile.
+
+    ``sram_acc[i] += sram_bias[i]`` for ``elements`` floats. With
+    ``broadcast = true`` the source is a 16-element bias vector and each
+    row of the 16x16 tile receives the same values, which is how the
+    compiler folds a matmul bias into the accumulator.
+    """
+
+    name = "astra.microcode.vector_add"
+    elements = opt_prop_def(IntAttr, default_value=IntAttr(0))
+    broadcast = opt_prop_def(BoolAttr, default_value=BoolAttr.from_bool(False))
+    src_offset = opt_prop_def(IntAttr, default_value=IntAttr(0))
+    dst_offset = opt_prop_def(IntAttr, default_value=IntAttr(0))
+    sram_acc = operand_def(PtrType)
+    sram_bias = operand_def(PtrType)
+    out = result_def(PtrType)
+
+    irdl_options = (ParsePropInAttrDict(),)
+    assembly_format = (
+        "$sram_acc `,` $sram_bias attr-dict "
+        "`:` `(` type($sram_acc) `,` type($sram_bias) `)` `->` type($out)"
+    )
+
+    def __init__(
+        self,
+        sram_acc: object,
+        sram_bias: object,
+        out_type: PtrType,
+        *,
+        elements: int | IntAttr = 0,
+        broadcast: bool = False,
+        src_offset: int | IntAttr = 0,
+        dst_offset: int | IntAttr = 0,
+    ) -> None:
+        super().__init__(
+            operands=[sram_acc, sram_bias],
+            result_types=[out_type],
+            properties={
+                "elements": IntAttr(elements) if isinstance(elements, int) else elements,
+                "broadcast": BoolAttr.from_bool(broadcast),
+                "src_offset": IntAttr(src_offset) if isinstance(src_offset, int) else src_offset,
+                "dst_offset": IntAttr(dst_offset) if isinstance(dst_offset, int) else dst_offset,
+            },
+        )
+
+    def verify_(self) -> None:
+        for name, value in (("sram_acc", self.sram_acc), ("sram_bias", self.sram_bias)):
+            ptr = _check_ptr(value, f"astra.microcode.vector_add operand '{name}'")
+            if ptr.space.data is MemorySpace.DRAM:
+                raise VerifyException(
+                    f"astra.microcode.vector_add {name} must be an SRAM region "
+                    "(sram0 | sram1 | scratch), got dram"
+                )
+        out = _check_ptr(self.out, "astra.microcode.vector_add result")
+        if out.space.data is MemorySpace.DRAM:
+            raise VerifyException(
+                "astra.microcode.vector_add result must be an SRAM region "
+                "(sram0 | sram1 | scratch), got dram"
+            )
+        _check_nonneg_int(self.elements, "microcode.vector_add elements")
+
+
+# ---------------------------------------------------------------------------
 # Dialect registration
 # ---------------------------------------------------------------------------
 
@@ -519,6 +639,7 @@ Astra = Dialect(
         MicrocodeDmaStoreOp,
         MicrocodeMatmulOp,
         MicrocodeVectorGeluOp,
+        MicrocodeVectorAddOp,
     ],
     [
         MemorySpaceAttr,

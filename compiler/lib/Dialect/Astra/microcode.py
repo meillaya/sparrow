@@ -14,7 +14,13 @@ class OpCode(IntEnum):
     DMA_STORE = 0x02
     MATMUL = 0x03
     VECTOR_GELU = 0x04
+    VECTOR_ADD = 0x05
+    VECTOR_ADD_BROADCAST = 0x06
     HALT = 0xFF
+
+
+#: Largest immediate a single DMA instruction can carry.
+MAX_DMA_BYTES = 0x7FFF
 
 
 @dataclass(frozen=True, slots=True)

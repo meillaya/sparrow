@@ -18,6 +18,7 @@
 #include "forge_rt/artifact_descriptor.hpp"
 #include "forge_rt/execution_plan.hpp"
 #include "forge_rt/scheduler.hpp"
+#include "forge_rt/providers/astra_provider.hpp"
 #include "forge_rt/providers/cpu_provider.hpp"
 #include "forge_rt/providers/triton_provider.hpp"
 
@@ -164,9 +165,10 @@ py::list execute_plan(const std::string& plan_json, py::list inputs) {
     }
     for (const ArtifactDescriptor& artifact : plan.artifacts) {
         if (artifact.target != TargetKind::CPU &&
-            artifact.target != TargetKind::Triton) {
+            artifact.target != TargetKind::Triton &&
+            artifact.target != TargetKind::Astra) {
             throw py::value_error(
-                "execute_plan: only CPU and Triton artifacts are supported by this binding");
+                "execute_plan: CPU, Triton, and Astra artifacts are supported by this binding");
         }
     }
 
@@ -212,7 +214,8 @@ py::list execute_plan(const std::string& plan_json, py::list inputs) {
 
     auto cpu_provider = std::make_shared<providers::CpuProvider>();
     auto triton_provider = std::make_shared<providers::TritonProvider>();
-    Scheduler scheduler({cpu_provider, triton_provider});
+    auto astra_provider = std::make_shared<providers::AstraProvider>();
+    Scheduler scheduler({cpu_provider, triton_provider, astra_provider});
     auto result = scheduler.execute(plan, input_buffers, output_buffers);
     if (!result.ok()) {
         throw std::runtime_error("execute_plan: " + result.error().message);

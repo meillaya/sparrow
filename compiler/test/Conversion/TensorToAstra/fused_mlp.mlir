@@ -5,7 +5,7 @@
 // after lowering, and the 15-bit DMA immediate cannot carry the real byte
 // counts. The CLI must reject the request, not emit wrong IR.
 
-// CHECK-ERR: TensorToAstra is unavailable
+// CHECK-ERR: TensorToAstra is not part of the shipped pipeline
 
 func.func @fused_mlp_lowered(
     %x: !forge.tensor<2x512x4096xf32>,

@@ -551,11 +551,10 @@ class TensorToAstraPass(ModulePass):
 
     def apply(self, ctx: Context, op: ModuleOp) -> None:
         raise VerifyException(
-            "TensorToAstra is unavailable: the astra dialect cannot represent "
-            "SRAM addresses, the conversion cannot recover gemm and epilogue "
-            "shapes after lowering, and the 15-bit DMA immediate cannot carry "
-            "the real byte counts. The dialect and simulator remain for "
-            "research; no compiler lowering is shipped."
+            "TensorToAstra is not part of the shipped pipeline: the working "
+            "Astra v2 lowering lives in forge_torch.astra (layout, DMA "
+            "chunking, K tiling, binary artifact). This pass remains "
+            "disabled so the two paths cannot drift."
         )
 
         # The code below is kept for the Astra v2 design. It is not

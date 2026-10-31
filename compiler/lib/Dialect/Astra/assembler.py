@@ -15,6 +15,7 @@ from . import (
     MicrocodeDmaLoadOp,
     MicrocodeDmaStoreOp,
     MicrocodeMatmulOp,
+    MicrocodeVectorAddOp,
     MicrocodeVectorGeluOp,
     PtrType,
 )
@@ -117,6 +118,12 @@ def _parse_instruction(line: str, line_number: int) -> int:
             src = _parse_address(fields["src"], "SRAM", "src", line_number)
             elements = _parse_number(fields["elements"], "elements", line_number)
             return encode(opcode, dst, src, imm=elements)
+        case OpCode.VECTOR_ADD | OpCode.VECTOR_ADD_BROADCAST:
+            _require_fields(fields, frozenset({"dst", "src", "elements"}), line_number)
+            dst = _parse_address(fields["dst"], "SRAM", "dst", line_number)
+            src = _parse_address(fields["src"], "SRAM", "src", line_number)
+            elements = _parse_number(fields["elements"], "elements", line_number)
+            return encode(opcode, dst, src, imm=elements)
 
 
 def assemble(text: str) -> list[int]:
@@ -157,6 +164,10 @@ def disassemble(words: list[int]) -> str:
                 lines.append(
                     f"VECTOR_GELU dst={_format_address('SRAM', instr.reg_a)}, src={_format_address('SRAM', instr.reg_b)}, elements={instr.imm}"
                 )
+            case OpCode.VECTOR_ADD | OpCode.VECTOR_ADD_BROADCAST:
+                lines.append(
+                    f"{instr.opcode.name} dst={_format_address('SRAM', instr.reg_a)}, src={_format_address('SRAM', instr.reg_b)}, elements={instr.imm}"
+                )
     return "\n".join(lines)
 
 
@@ -166,6 +177,7 @@ type AstraOp = (
     | MicrocodeDmaStoreOp
     | MicrocodeMatmulOp
     | MicrocodeVectorGeluOp
+    | MicrocodeVectorAddOp
 )
 
 _DIALECT_MARKER = 0x8000
@@ -182,11 +194,19 @@ def _encode_dialect_op(op: AstraOp) -> int:
                 imm=op.k.data,
             )
         case MicrocodeDmaLoadOp():
-            return encode(OpCode.DMA_LOAD, 0, 0, imm=op.bytes.data)
+            return encode(
+                OpCode.DMA_LOAD, op.sram_offset.data, op.dram_offset.data, imm=op.bytes.data
+            )
         case MicrocodeDmaStoreOp():
-            return encode(OpCode.DMA_STORE, 0, 0, imm=op.bytes.data)
+            return encode(
+                OpCode.DMA_STORE, op.dram_offset.data, op.sram_offset.data, imm=op.bytes.data
+            )
         case MicrocodeMatmulOp():
             bias_marker = _DIALECT_MARKER if op.bias is not None else 0
+            # The word has no room for m, n, k, and two offsets at once.
+            # The dialect encoding keeps the M/N/K form so a round trip is
+            # lossless; the binary artifact builder encodes tile offsets
+            # directly because its M/N are fixed at 16.
             return encode(
                 OpCode.MATMUL,
                 op.m.data,
@@ -194,7 +214,20 @@ def _encode_dialect_op(op: AstraOp) -> int:
                 imm=op.k.data,
             )
         case MicrocodeVectorGeluOp():
-            return encode(OpCode.VECTOR_GELU, 0, 0)
+            return encode(
+                OpCode.VECTOR_GELU,
+                op.dst_offset.data,
+                op.src_offset.data,
+                imm=op.elements.data,
+            )
+        case MicrocodeVectorAddOp():
+            opcode = OpCode.VECTOR_ADD_BROADCAST if op.broadcast.value else OpCode.VECTOR_ADD
+            return encode(
+                opcode,
+                op.dst_offset.data,
+                op.src_offset.data,
+                imm=op.elements.data,
+            )
 
 
 def assemble_from_dialect(microcode_ops: list[AstraOp]) -> list[int]:
@@ -248,6 +281,20 @@ def _decode_dialect_op(instr: MicrocodeInstr) -> AstraOp:
             return MicrocodeVectorGeluOp(
                 _placeholder(sram),
                 sram,
+                elements=instr.imm,
+                src_offset=instr.reg_b,
+                dst_offset=instr.reg_a,
+            )
+        case OpCode.VECTOR_ADD | OpCode.VECTOR_ADD_BROADCAST:
+            sram = PtrType(MemorySpace.SRAM0)
+            return MicrocodeVectorAddOp(
+                _placeholder(sram),
+                _placeholder(sram),
+                sram,
+                elements=instr.imm,
+                broadcast=instr.opcode is OpCode.VECTOR_ADD_BROADCAST,
+                src_offset=instr.reg_b,
+                dst_offset=instr.reg_a,
             )
         case OpCode.NOP | OpCode.HALT:
             raise ValueError(f"{instr.opcode.name} has no Astra dialect operation")

@@ -514,7 +514,8 @@ Astra backend or general heterogeneous execution.
 | Fixed | AUD-33 | M3 canonical `OpSpec` table shared by importer, region, partitioner, and capability check |
 | Open | AUD-34, AUD-38 | Test gaps, provider shapes |
 | Open | AUD-40, AUD-41, AUD-43 through AUD-46 | Sanitizers, duplicate result types, dead code, stale comments, report durability |
-| Open | AUD-54 through AUD-58 | Astra attributes, compiler test depth, DCE, MicroGPU numerics, roundtrip |
+| Mitigated | AUD-54, AUD-58 | Astra v2 uses a binary artifact with real offsets and attributes; the legacy TensorToAstra round trip stays lossy and disabled |
+| Open | AUD-55, AUD-56, AUD-57 | Compiler test depth, DCE scope, MicroGPU numerics |
 
 ## Limits of this audit
 
@@ -535,3 +536,7 @@ The M4 follow-up added the version 3 device table, mixed CPU/Triton execution,
 derived cost tables, and the config-A-only `compile_partitioned` contract:
 49 ctest cases, 35 lit tests, and 300 pytest cases (1 skipped for missing
 Triton), with ruff and ty passing.
+
+The M5 follow-up added Astra v2 layout, DMA chunking, K tiling, the vector-add
+opcode, and the binary artifact executor: 49 ctest cases, 36 lit tests, and
+306 pytest cases (1 skipped for missing Triton), with ruff and ty passing.

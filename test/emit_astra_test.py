@@ -18,11 +18,20 @@ assert isinstance(_codegen_module, _AstraCodegenApi)
 codegen = _codegen_module
 
 fused_mlp_microcode_region = """
-%s0 = astra.microcode.dma_load %dram_a {bytes = #builtin.int<8192>}
-%s1 = astra.microcode.dma_load %dram_b {bytes = #builtin.int<4096>}
-%s2 = astra.microcode.matmul %s0, %s1 {m = #builtin.int<16>, n = #builtin.int<16>, k = #builtin.int<16>}
-%s3 = astra.microcode.vector_gelu %s2
-%out = astra.microcode.dma_store %s3 {bytes = #builtin.int<4096>}
+func.func @region(%dram_a: i64, %dram_b: i64) -> i64 {
+  %s0 = astra.microcode.dma_load %dram_a {bytes = #builtin.int<8192>, sram_offset = #builtin.int<0>}
+      : (i64) -> !astra.ptr<#astra.memory_space<sram0>>
+  %s1 = astra.microcode.dma_load %dram_b {bytes = #builtin.int<4096>, sram_offset = #builtin.int<8192>}
+      : (i64) -> !astra.ptr<#astra.memory_space<sram0>>
+  %s2 = astra.microcode.matmul %s0, %s1 {m = #builtin.int<16>, n = #builtin.int<16>, k = #builtin.int<16>}
+      : (!astra.ptr<#astra.memory_space<sram0>>, !astra.ptr<#astra.memory_space<sram0>>)
+        -> !astra.ptr<#astra.memory_space<sram0>>
+  %s3 = astra.microcode.vector_gelu %s2 {elements = #builtin.int<256>, src_offset = #builtin.int<0>, dst_offset = #builtin.int<1024>}
+      : (!astra.ptr<#astra.memory_space<sram0>>) -> !astra.ptr<#astra.memory_space<sram0>>
+  %out = astra.microcode.dma_store %s3 {bytes = #builtin.int<4096>, dram_offset = #builtin.int<0>, sram_offset = #builtin.int<1024>}
+      : (!astra.ptr<#astra.memory_space<sram0>>) -> i64
+  return %out : i64
+}
 """
 
 
@@ -38,3 +47,8 @@ def test_emit_astra_word_count_matches_microcode_op_count() -> None:
         OpCode.VECTOR_GELU,
         OpCode.DMA_STORE,
     ]
+    assert decode(words[0]).reg_a == 0
+    assert decode(words[0]).reg_b == 0
+    assert decode(words[1]).reg_a == 8192
+    assert decode(words[4]).reg_a == 0
+    assert decode(words[4]).reg_b == 1024
