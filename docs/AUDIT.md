@@ -500,15 +500,15 @@ Astra backend or general heterogeneous execution.
 | Fixed | AUD-10, AUD-11, AUD-18, AUD-39 | Artifact table, capacity checks, non-owning caller buffers, dtype gate |
 | Fixed | AUD-12, AUD-20, AUD-21, AUD-22, AUD-23 | Test paths, fail-closed CI, license, README links, quickstart |
 | Fixed | AUD-29, AUD-30, AUD-31 | Zero alignment, external I/O aliasing, SIGPIPE |
-| Fixed | AUD-25, AUD-42 | Package discovery, unified 0.2.0 version |
+| Fixed | AUD-19, AUD-25, AUD-42 | torch.compile entry point, package discovery, unified 0.2.0 version |
 | Mitigated | AUD-27, AUD-28 | Project fallback and link order fixed; Linux paths and orphan test stub remain |
 | Fixed | AUD-51, AUD-52, AUD-53 | Symbolic dim parser, result dtype checks, multi-use fuse guard |
-| Mitigated | AUD-07, AUD-08, AUD-13 | Native fused-MLP path exists; general graphs stay eager; reports use optional fields and metrics are marked estimates |
+| Mitigated | AUD-07, AUD-08, AUD-13 | Native fused-MLP and CPU plan paths execute supported graphs; unsupported graphs stay eager; reports use optional fields and metrics are marked estimates |
 | Mitigated | AUD-09, AUD-36 | Capabilities narrowed; lowering map empty; partitioner raises |
 | Mitigated | AUD-47 through AUD-50 | Astra lowering disabled; CLI rejects the request |
 | Mitigated | AUD-17, AUD-32 | Shared atomic events; plan version and validating parser |
 | Open | AUD-14, AUD-15, AUD-16 | Classic FX importer, cost model, cycle-table drift |
-| Open | AUD-19, AUD-24, AUD-26 | No torch.compile hook, package path rename, pins |
+| Open | AUD-24, AUD-26 | Package path rename, pins |
 | Open | AUD-33, AUD-34, AUD-37, AUD-38 | Duplicate maps, test gaps, full-model region calls, provider shapes |
 | Open | AUD-40, AUD-41, AUD-43 through AUD-46 | Sanitizers, duplicate result types, dead code, stale comments, report durability |
 | Open | AUD-54 through AUD-58 | Astra attributes, compiler test depth, DCE, MicroGPU numerics, roundtrip |

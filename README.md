@@ -108,6 +108,25 @@ and MicroGPU still have no compiler lowering, so the two figures describe one
 design whose halves meet only for the supported CPU path. The specification
 marks the rest as gaps.
 
+## torch.compile
+
+Install the project so PyTorch discovers the backend entry point:
+
+```bash
+uv pip install -e .
+```
+
+Then select it by name:
+
+```python
+compiled = torch.compile(model, backend="sparrow")
+```
+
+Dynamo lifts model parameters into graph placeholders and hands the graph to
+`compile_graph`. The backend returns the tuple shape Dynamo expects. The same
+CPU plan and native paths handle execution, so an unsupported op still falls
+back to eager and records the reason.
+
 ## Checks
 
 ```bash

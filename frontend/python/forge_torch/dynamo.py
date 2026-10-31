@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 
-from forge_torch.backend import CompiledFusedMLP, compile_graph
+from forge_torch.backend import compile_graph
 
 
 def backend(
     gm: torch.fx.GraphModule,
     example_inputs: list[torch.Tensor],
-) -> CompiledFusedMLP:
+) -> Callable[..., tuple[torch.Tensor, ...]]:
     """Compile a Dynamo graph through the Sparrow frontend.
 
     Dynamo lifts model parameters into graph placeholders, so the
@@ -20,7 +22,7 @@ def backend(
     """
     compiled = compile_graph(gm, list(example_inputs))
 
-    def call(*args):
+    def call(*args: torch.Tensor) -> tuple[torch.Tensor, ...]:
         output = compiled(*args)
         if isinstance(output, tuple):
             return output
