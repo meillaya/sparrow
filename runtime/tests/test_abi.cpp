@@ -8,8 +8,10 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 using forge_rt::ArtifactDescriptor;
@@ -173,6 +175,17 @@ TEST(Event_wait_completes, ZeroTimeoutBeforeCompleteReturnsError) {
     EXPECT_TRUE(ev.completed());
     auto r2 = ev.wait(std::chrono::milliseconds{0});
     EXPECT_TRUE(r2.ok());
+}
+
+TEST(EventCopy, CopiesShareCompletionState) {
+    Event original(3);
+    Event copy = original;
+    EXPECT_FALSE(original.completed());
+    EXPECT_FALSE(copy.completed());
+
+    copy.mark_completed();
+    EXPECT_TRUE(original.completed());
+    EXPECT_TRUE(copy.completed());
 }
 
 TEST(Event_wait_completes, PositiveTimeoutPollsUntilComplete) {

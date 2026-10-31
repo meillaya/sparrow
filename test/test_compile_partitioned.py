@@ -43,6 +43,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from forge_torch.compile_partitioned import compile_partitioned
 
 # ---------------------------------------------------------------------------

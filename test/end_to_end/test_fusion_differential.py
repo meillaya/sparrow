@@ -23,12 +23,17 @@ remains verifier-clean and numerically identical after fuse.
 from __future__ import annotations
 
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import torch
+
 from forge_torch.backend import CompiledFusedMLP, compile
 from forge_torch.conftest import FusedMLP
 from forge_torch.validation import validate
+
+REPO = Path(__file__).resolve().parents[2]
 
 SHAPES = [
     # (B, S, K, N) — Phase 1 canonical (spec §19)
@@ -51,8 +56,8 @@ def _run_pass(mlir_text: str, pass_name: str) -> str:
     """
     proc = subprocess.run(
         [
-            "/home/mei/projects/forgestack/.venv/bin/python3",
-            "/home/mei/projects/forgestack/compiler/tools/forge-opt/forge_opt.py",
+            sys.executable,
+            str(REPO / "compiler" / "tools" / "forge-opt" / "forge_opt.py"),
             "-",
             "--action=optimize",
             f"--pass-pipeline={pass_name}",

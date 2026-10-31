@@ -2,7 +2,7 @@
 
 # frontend/python/forge_torch/_phase4_stub_reader.py
 #
-# Phase 4 cost-stub reader (Task 9 of `forgestack-phase7.md`).
+# Phase 4 cost-stub reader (Task 9 of the phase 7 plan).
 #
 # Phase 4's `CompilationReport` carries the two ``alternative_*_cost``
 # strings (e.g. ``"1.31x"``, ``"2.04x including transfer"``) that record

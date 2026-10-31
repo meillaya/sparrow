@@ -1,6 +1,6 @@
 """End-to-end FusedMLP-on-astra-sim pytest (Phase 4, Task 63 / Wave 14).
 
-Confirms the ForgeStack end-to-end pipeline — FX capture, MLIR import,
+Confirms the Sparrow end-to-end pipeline — FX capture, MLIR import,
 cache key, ``compile()`` returning a callable — produces a tensor that
 matches eager within fp32 atol=1e-4. The shipped compiled path delegates
 to eager (per Phase 1's backwards-compat contract; the C++ provider is
@@ -20,8 +20,6 @@ import math
 import numpy as np
 import pytest
 import torch
-from forge_torch.backend import compile
-from forge_torch.conftest import FusedMLP
 
 from backends.astra.sim.functional import (
     DRAM_BYTES,
@@ -31,6 +29,8 @@ from backends.astra.sim.functional import (
     run_functional,
 )
 from compiler.lib.Dialect.Astra.assembler import assemble
+from forge_torch.backend import compile
+from forge_torch.conftest import FusedMLP
 
 SHAPES = [
     # (B, S, K, N) — Phase 1 canonical (spec §19)

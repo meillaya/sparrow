@@ -1,23 +1,13 @@
 """Compilation observability report (per spec §16).
 
-The :class:`CompilationReport` is the canonical payload every Phase-1
-``torch.compile(backend="forgestack")`` call writes to
-``.omo/evidence/phase1-report.txt``. Its sections mirror spec §16:
+The :class:`CompilationReport` records what the compiler measured and
+what it could not measure. Measured fields carry values; fields that the
+shipped path cannot populate carry ``None`` and render as ``unavailable``.
+The earlier report filled several fields with constants for every model,
+which made the report look complete when it was not.
 
-1. Model name
-2. FX node count
-3. MLIR op counts per pass (canonicalize etc.)
-4. Fusion groups
-5. Selected target
-6. Alternative target costs (Astra, FPGA with transfer overhead)
-7. Selected schedule (tile sizes, warps, stages)
-8. Peak intermediate memory
-9. Generated kernel count
-10. Validation max error
-
-The dataclass doubles as the JSON serialization target — ``to_json``
-and :meth:`from_json` round-trip every field so callers can persist
-the report alongside the cache artifact.
+The dataclass doubles as the JSON serialization target. ``to_json`` and
+``from_json`` round-trip every field, including the optional ones.
 """
 
 from __future__ import annotations
@@ -53,18 +43,19 @@ class Schedule(TypedDict, total=False):
 
 class CompilationReportPayload(TypedDict):
     model_name: str
+    execution_path: str
     captured_fx_nodes: int
     imported_mlir_operations: int
     operations_after_canonicalize: int
-    fusion_groups: int
+    fusion_groups: int | None
     selected_target: str
-    alternative_astra_cost: str
-    alternative_fpga_cost: str
+    alternative_astra_cost: str | None
+    alternative_fpga_cost: str | None
     schedule: Schedule
-    original_intermediate_memory_mb: float
-    planned_intermediate_memory_mb: float
-    generated_kernels: int
-    validation_max_error: float
+    original_intermediate_memory_mb: float | None
+    planned_intermediate_memory_mb: float | None
+    generated_kernels: int | None
+    validation_max_error: float | None
 
 
 class PayloadLoader(Protocol):
@@ -76,21 +67,27 @@ _LOAD_PAYLOAD: Final[PayloadLoader] = json.loads
 
 @dataclass
 class CompilationReport:
-    """Spec §16 compilation observability report."""
+    """Spec §16 compilation observability report.
+
+    ``execution_path`` is ``eager`` for the shipped frontend path and
+    ``native`` when a lowered callable exists. Optional fields stay
+    ``None`` until the step that measures them runs.
+    """
 
     model_name: str
+    execution_path: str = "eager"
     captured_fx_nodes: int = 0
     imported_mlir_operations: int = 0
     operations_after_canonicalize: int = 0
-    fusion_groups: int = 0
+    fusion_groups: int | None = None
     selected_target: str = ""
-    alternative_astra_cost: str = ""  # e.g. "1.31x"
-    alternative_fpga_cost: str = ""  # e.g. "2.04x including transfer"
+    alternative_astra_cost: str | None = None
+    alternative_fpga_cost: str | None = None
     schedule: Schedule = field(default_factory=Schedule)
-    original_intermediate_memory_mb: float = 0.0
-    planned_intermediate_memory_mb: float = 0.0
-    generated_kernels: int = 0
-    validation_max_error: float = 0.0
+    original_intermediate_memory_mb: float | None = None
+    planned_intermediate_memory_mb: float | None = None
+    generated_kernels: int | None = None
+    validation_max_error: float | None = None
     plan: InitVar[ExecutionPlanView | None] = None
 
     def __post_init__(self, plan: ExecutionPlanView | None) -> None:
@@ -108,15 +105,16 @@ class CompilationReport:
         """Render the report as a fixed-width human-readable string."""
         lines = [
             f"Model: {self.model_name}",
+            f"Execution path:                {self.execution_path}",
             "",
             f"Captured FX nodes:              {self.captured_fx_nodes}",
             f"Imported MLIR operations:       {self.imported_mlir_operations}",
             f"Operations after canonicalize:  {self.operations_after_canonicalize}",
-            f"Fusion groups:                  {self.fusion_groups}",
+            f"Fusion groups:                  {_format_int(self.fusion_groups)}",
             "",
             f"Selected target:                {self.selected_target}",
-            f"Alternative Astra cost:         {self.alternative_astra_cost}",
-            f"Alternative FPGA cost:          {self.alternative_fpga_cost}",
+            f"Alternative Astra cost:         {_format_text(self.alternative_astra_cost)}",
+            f"Alternative FPGA cost:          {_format_text(self.alternative_fpga_cost)}",
             "",
             "Selected schedule:",
             f"  tile M:                       {self.schedule.get('tile_m', '-')}",
@@ -125,10 +123,10 @@ class CompilationReport:
             f"  warps:                        {self.schedule.get('warps', '-')}",
             f"  stages:                       {self.schedule.get('stages', '-')}",
             "",
-            f"Original intermediate memory:   {self.original_intermediate_memory_mb:.1f} MB",
-            f"Planned intermediate memory:     {self.planned_intermediate_memory_mb:.1f} MB",
-            f"Generated kernels:               {self.generated_kernels}",
-            f"Validation max error:            {self.validation_max_error:.4f}",
+            f"Original intermediate memory:   {_format_float(self.original_intermediate_memory_mb)}",
+            f"Planned intermediate memory:     {_format_float(self.planned_intermediate_memory_mb)}",
+            f"Generated kernels:               {_format_int(self.generated_kernels)}",
+            f"Validation max error:            {_format_float(self.validation_max_error, digits=4)}",
         ]
         return "\n".join(lines)
 
@@ -136,6 +134,7 @@ class CompilationReport:
         """Serialize all fields to a stable JSON string."""
         payload: CompilationReportPayload = {
             "model_name": self.model_name,
+            "execution_path": self.execution_path,
             "captured_fx_nodes": self.captured_fx_nodes,
             "imported_mlir_operations": self.imported_mlir_operations,
             "operations_after_canonicalize": self.operations_after_canonicalize,
@@ -156,3 +155,15 @@ class CompilationReport:
         """Inverse of :meth:`to_json`; preserves every dataclass field."""
         payload = _LOAD_PAYLOAD(s)
         return cls(**payload)
+
+
+def _format_text(value: str | None) -> str:
+    return value if value is not None else "unavailable"
+
+
+def _format_int(value: int | None) -> str:
+    return str(value) if value is not None else "unavailable"
+
+
+def _format_float(value: float | None, *, digits: int = 1) -> str:
+    return f"{value:.{digits}f}" if value is not None else "unavailable"

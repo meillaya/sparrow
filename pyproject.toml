@@ -1,16 +1,15 @@
-# pyproject.toml — ForgeStack Phase 1 Python project metadata + tool config.
+# pyproject.toml — Sparrow Phase 1 Python project metadata + tool config.
 #
 # Toolchain (2026-07-18): uv for env/deps, ruff for lint+format, ty for types.
-# See .omo/notepads/forgestack/learnings.md §(d) for the migration rationale.
 [project]
-name = "forgestack"
-version = "0.1.0"
-description = "ForgeStack Phase 1 — xDSL ↔ MLIR ↔ libtorch dialect bridge (vertical slice)"
+name = "sparrow"
+version = "0.2.0"
+description = "Sparrow: a PyTorch-to-xDSL compiler and C++ runtime for CPU backends"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = { text = "Apache-2.0" }
 authors = [
-    { name = "ForgeStack contributors" },
+    { name = "Sparrow contributors" },
 ]
 keywords = ["xdsl", "mlir", "torch", "compiler", "dialect"]
 classifiers = [
@@ -25,11 +24,11 @@ classifiers = [
 # scripts/setup-env.sh). Listing them here as well keeps `uv sync` and
 # downstream tools honest about the project's true requirements.
 dependencies = [
-    "torch",
-    "xdsl>=0.68",
-    "numpy",
-    "pybind11",
-    "lit",
+    "torch>=2.3,<3",
+    "xdsl>=0.68,<0.75",
+    "numpy>=1.26,<3",
+    "pybind11>=2.12",
+    "lit>=18",
 ]
 
 [project.optional-dependencies]
@@ -37,12 +36,17 @@ dependencies = [
 # integration tests; both already live in `dependencies` but are also surfaced
 # here for clarity when CI installs just the test subset.
 test = [
-    "pytest",
+    "pytest>=8",
 ]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = [".", "frontend/python"]
+include = ["compiler.lib*", "backends*", "forge_torch*"]
+namespaces = true
 
 # ---------------------------------------------------------------------------
 # ruff — linter + formatter (https://docs.astral.sh/ruff/)
@@ -84,7 +88,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["forgestack"]
+known-first-party = ["forge_torch", "compiler", "backends"]
 
 [tool.ruff.format]
 # Use double quotes (Black-compatible) and a trailing comma on multi-line
@@ -133,6 +137,10 @@ invalid-assignment = "warn"
 # don't model; the BLOCK_* / DTYPE kwargs are real constexpr params, and
 # `num_warps` / `num_stages` are launcher-level knobs the stubs omit.
 unknown-argument = "warn"
+# torch's `nn.Module.forward` stub is mutable; every concrete override
+# trips these two rules even when the signature is correct.
+invalid-mutable-override = "warn"
+invalid-method-override = "warn"
 
 [tool.ty.terminal]
 error-on-warning = false

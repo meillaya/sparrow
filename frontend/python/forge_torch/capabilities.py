@@ -79,7 +79,6 @@ TRITON_CAPABILITIES: Final[BackendCapabilities] = BackendCapabilities(
             "forge.tensor.layer_norm",
             "forge.tensor.softmax",
             "forge.tensor.scaled_dot_product_attention",
-            "forge.tensor.reshape",
         }
     ),
     supported_types=frozenset({"fp32"}),
@@ -108,7 +107,6 @@ ASTRA_CAPABILITIES: Final[BackendCapabilities] = BackendCapabilities(
             "forge.tensor.fused_epilogue",
             "forge.tensor.broadcast_add",
             "forge.tensor.gelu",
-            "forge.tensor.layer_norm",
         }
     ),
     supported_types=frozenset({"fp32"}),
@@ -132,13 +130,10 @@ MICROGPU_CAPABILITIES: Final[BackendCapabilities] = BackendCapabilities(
     name="microgpu",
     supported_ops=frozenset(
         {
-            "forge.tensor.gemm",
-            "forge.tensor.fused_epilogue",
             "forge.tensor.broadcast_add",
             "forge.tensor.gelu",
             "forge.tensor.layer_norm",
             "forge.tensor.softmax",
-            "forge.tensor.scaled_dot_product_attention",
         }
     ),
     supported_types=frozenset({"fp32"}),
@@ -151,10 +146,10 @@ MICROGPU_CAPABILITIES: Final[BackendCapabilities] = BackendCapabilities(
 
 # ---------------------------------------------------------------------------
 # Registry — single source of truth for ``compile(target=...)`` and the
-# partitioner (Task 18). Adding a backend = adding an entry here + an
-# instantiation above. The dict is typed ``str`` so ``BACKEND_CAPABILITIES``
-# is also the lookup table the partitioner's memoized ``is_capable_of()``
-# check indexes by name.
+# partitioner. These sets describe what a backend can run, not what the
+# compiler can lower. The partitioner must also consult
+# ``forge_torch.lowerings.COMPILER_LOWERINGS``; a capability without a
+# lowering is a planning option, not a working path.
 # ---------------------------------------------------------------------------
 
 BACKEND_CAPABILITIES: Final[dict[str, BackendCapabilities]] = {

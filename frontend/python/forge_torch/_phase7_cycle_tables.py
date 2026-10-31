@@ -113,8 +113,8 @@ def read_phase4_stubs(report: CompilationReport) -> dict[str, str]:
     is safe to call on a freshly-instantiated :class:`CompilationReport`.
     """
     return {
-        "alternative_astra_cost": report.alternative_astra_cost,
-        "alternative_fpga_cost": report.alternative_fpga_cost,
+        "alternative_astra_cost": report.alternative_astra_cost or "",
+        "alternative_fpga_cost": report.alternative_fpga_cost or "",
     }
 
 

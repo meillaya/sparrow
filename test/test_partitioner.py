@@ -40,8 +40,11 @@ isolation; Phase 7 production callers pass the full
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn as nn
+from torch.fx import GraphModule, Node
+
 from forge_torch.capabilities import (
     ASTRA_CAPABILITIES,
     BACKEND_CAPABILITIES,
@@ -49,8 +52,7 @@ from forge_torch.capabilities import (
     BackendCapabilities,
 )
 from forge_torch.cost_estimator import estimate_cost
-from forge_torch.partitioner import partition
-from torch.fx import GraphModule, Node
+from forge_torch.partitioner import UnsupportedRegionError, partition
 
 # ---------------------------------------------------------------------------
 # FX-graph scaffolding helpers.
@@ -62,6 +64,11 @@ from torch.fx import GraphModule, Node
 # graph-builder scaffolding while remaining deterministic across PyTorch
 # versions.
 # ---------------------------------------------------------------------------
+
+
+def _lowerings(caps: dict[str, BackendCapabilities]) -> dict[str, frozenset[str]]:
+    """Every capability also has a lowering, for algorithm tests."""
+    return {name: capability.supported_ops for name, capability in caps.items()}
 
 
 def _trace_module(model: nn.Module, example_inputs: list[torch.Tensor]) -> GraphModule:
@@ -167,7 +174,7 @@ def test_linear_region_picks_triton() -> None:
         "astra": ASTRA_CAPABILITIES,
     }
 
-    result = partition([region], caps, estimate_cost)
+    result = partition([region], caps, estimate_cost, lowerings=_lowerings(caps))
 
     assert len(result) == 1
     chosen_region, chosen_backend = result[0]
@@ -208,7 +215,7 @@ def test_matmul_only_region_prefers_astra_for_larger_shapes() -> None:
         "astra": ASTRA_CAPABILITIES,
     }
 
-    result = partition([[matmul_node]], caps, estimate_cost)
+    result = partition([[matmul_node]], caps, estimate_cost, lowerings=_lowerings(caps))
 
     assert len(result) == 1
     chosen_region, chosen_backend = result[0]
@@ -269,7 +276,7 @@ def test_softmax_region_excludes_astra() -> None:
         "astra": ASTRA_CAPABILITIES,
     }
 
-    result = partition([[softmax_node]], caps, estimate_cost)
+    result = partition([[softmax_node]], caps, estimate_cost, lowerings=_lowerings(caps))
 
     assert len(result) == 1
     chosen_region, chosen_backend = result[0]
@@ -286,8 +293,24 @@ def test_softmax_region_excludes_astra() -> None:
     # entry either, so its 0-cycle cost would otherwise dominate —
     # intentionally excluded here to keep the test deterministic).
     full_caps: dict[str, BackendCapabilities] = dict(BACKEND_CAPABILITIES)
-    result_full = partition([[softmax_node]], full_caps, estimate_cost)
+    result_full = partition(
+        [[softmax_node]], full_caps, estimate_cost, lowerings=_lowerings(full_caps)
+    )
     chosen_backend_full = result_full[0][1]
     assert chosen_backend_full in {"triton", "microgpu"}, (
         f"unexpected backend chosen with full caps: {chosen_backend_full!r}"
     )
+
+
+def test_partitioner_fails_closed_without_a_lowering() -> None:
+    """The production lowering map is empty, so planning raises."""
+
+    class _Matmul(nn.Module):
+        def forward(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+            return torch.matmul(x, w)
+
+    gm = torch.fx.symbolic_trace(_Matmul())
+    matmul_node = _find_call_module(gm, op_name="matmul")
+
+    with pytest.raises(UnsupportedRegionError):
+        partition([[matmul_node]], dict(BACKEND_CAPABILITIES))

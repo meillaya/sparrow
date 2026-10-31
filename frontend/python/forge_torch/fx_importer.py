@@ -1,4 +1,4 @@
-"""FX → MLIR importer for ForgeStack.
+"""FX → MLIR importer for Sparrow.
 
 The :class:`FxImporter` walks a captured ``torch.fx.GraphModule`` and emits
 ``forge.graph`` dialect MLIR as a Python string. It is the Phase-1 bridge
@@ -170,7 +170,9 @@ class FxImporter:
             elif node.op == "call_module" or node.op == "output":
                 continue
             elif node.op == "get_attr":
-                raise NotImplementedError("FX get_attr nodes are not yet supported by ForgeTorch.")
+                raise NotImplementedError(
+                    "FX get_attr nodes are not yet supported by Sparrow frontend."
+                )
             else:
                 raise NotImplementedError(
                     f"unsupported FX node.op: {node.op!r} (target={node.target!r})"
@@ -188,8 +190,7 @@ class FxImporter:
         dtype_str = DTYPE_TO_FORGE.get(torch_dtype)
         if dtype_str is None:
             raise NotImplementedError(
-                f"placeholder dtype {torch_dtype!r} is not yet supported by "
-                f"the ForgeStack dialects."
+                f"placeholder dtype {torch_dtype!r} is not yet supported by the Sparrow dialects."
             )
         return self._forge_tensor_cls()(list(shape), dtype_str)
 
@@ -318,7 +319,7 @@ class FxImporter:
         if dtype_str is None:
             raise NotImplementedError(
                 f"FX node {node.name!r}: dtype {torch_dtype!r} is not yet "
-                f"supported by the ForgeStack dialects."
+                f"supported by the Sparrow dialects."
             )
         symbolic = self._symbolic_dim_for(node, shape)
         if symbolic is not None:
@@ -570,7 +571,7 @@ def _data_arg_names(node: Node) -> list[str]:
     downstream ``ssa_values`` lookup is unambiguous.
 
     Kwargs are scanned too: ``aten.layer_norm(x, [shape], weight=w, bias=b)``
-    passes the weight + bias Nodes via kwargs, and the ForgeStack importer
+    passes the weight + bias Nodes via kwargs, and the Sparrow importer
     needs them as SSA operands. Keyword-only constants (e.g. ``eps=1e-5``)
     are filtered just like positional constants.
     """

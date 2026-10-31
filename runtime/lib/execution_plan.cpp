@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <unordered_set>
 #include <vector>
 
 namespace forge_rt {
@@ -57,23 +58,6 @@ void from_json(const nlohmann::json& j, AllocationDefinition& a) {
     j.at("byte_size").get_to(a.byte_size);
     j.at("alignment").get_to(a.alignment);
     a.memory_space = static_cast<MemorySpace>(j.at("memory_space").get<uint8_t>());
-}
-
-// ---------------------------------------------------------------------------
-// LaunchParameters
-// ---------------------------------------------------------------------------
-void to_json(nlohmann::json& j, const LaunchParameters& l) {
-    j = nlohmann::json{
-        {"grid",                l.grid},
-        {"block",               l.block},
-        {"shared_memory_bytes", l.shared_memory_bytes},
-    };
-}
-
-void from_json(const nlohmann::json& j, LaunchParameters& l) {
-    j.at("grid").get_to(l.grid);
-    j.at("block").get_to(l.block);
-    j.at("shared_memory_bytes").get_to(l.shared_memory_bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -130,13 +114,15 @@ void from_json(const nlohmann::json& j, PlanOutput& o) {
 
 // ---------------------------------------------------------------------------
 // ExecutionPlan — top-level.
-// Note: no version / checksum fields yet. Task 14 (compilation cache)
-// introduces a hierarchical key; we'll add a `version` constant there
-// rather than in this Phase 1 payload. See `ExecutionPlan` comment.
+// Version 2 adds the artifact table. `from_json` stays permissive for
+// the ADL round-trip tests; callers that accept external JSON use
+// `parse_plan_json`, which validates ids and artifact references.
 // ---------------------------------------------------------------------------
 void to_json(nlohmann::json& j, const ExecutionPlan& p) {
     j = nlohmann::json{
+        {"version",     p.version},
         {"name",        p.name},
+        {"artifacts",   p.artifacts},
         {"tensors",     p.tensors},
         {"allocations", p.allocations},
         {"nodes",       p.nodes},
@@ -146,12 +132,92 @@ void to_json(nlohmann::json& j, const ExecutionPlan& p) {
 }
 
 void from_json(const nlohmann::json& j, ExecutionPlan& p) {
+    p.version = j.value("version", 1u);
     j.at("name").get_to(p.name);
+    if (j.contains("artifacts")) {
+        j.at("artifacts").get_to(p.artifacts);
+    } else {
+        p.artifacts.clear();
+    }
     j.at("tensors").get_to(p.tensors);
     j.at("allocations").get_to(p.allocations);
     j.at("nodes").get_to(p.nodes);
     j.at("inputs").get_to(p.inputs);
     j.at("outputs").get_to(p.outputs);
+}
+
+Result<ExecutionPlan> parse_plan_json(const nlohmann::json& j) {
+    ExecutionPlan plan;
+    try {
+        from_json(j, plan);
+    } catch (const nlohmann::json::exception& error) {
+        return Error{std::string("invalid plan JSON: ") + error.what(), -28};
+    }
+
+    if (plan.version == 0 || plan.version > ExecutionPlan::kCurrentVersion) {
+        return Error{"unsupported plan version " + std::to_string(plan.version) +
+                         " (supported: 1.." +
+                         std::to_string(ExecutionPlan::kCurrentVersion) + ")",
+                     -42};
+    }
+
+    std::unordered_set<TensorId> tensor_ids;
+    for (const TensorDefinition& tensor : plan.tensors) {
+        if (!tensor_ids.insert(tensor.id).second) {
+            return Error{"duplicate tensor id " + std::to_string(tensor.id), -28};
+        }
+    }
+    std::unordered_set<NodeId> node_ids;
+    for (const ExecutableNode& node : plan.nodes) {
+        if (!node_ids.insert(node.id).second) {
+            return Error{"duplicate node id " + std::to_string(node.id), -28};
+        }
+        if (plan.artifacts.empty() || node.artifact >= plan.artifacts.size()) {
+            return Error{"node " + std::to_string(node.id) +
+                             " references missing artifact " +
+                             std::to_string(node.artifact),
+                         -18};
+        }
+        for (const TensorId tid : node.inputs) {
+            if (!tensor_ids.contains(tid)) {
+                return Error{"node " + std::to_string(node.id) +
+                                 " references unknown input tensor " +
+                                 std::to_string(tid),
+                             -28};
+            }
+        }
+        for (const TensorId tid : node.outputs) {
+            if (!tensor_ids.contains(tid)) {
+                return Error{"node " + std::to_string(node.id) +
+                                 " references unknown output tensor " +
+                                 std::to_string(tid),
+                             -28};
+            }
+        }
+    }
+    for (const PlanInput& input : plan.inputs) {
+        if (!tensor_ids.contains(input.tensor_id)) {
+            return Error{"plan input references unknown tensor " +
+                             std::to_string(input.tensor_id),
+                         -28};
+        }
+    }
+    for (const PlanOutput& output : plan.outputs) {
+        if (!tensor_ids.contains(output.tensor_id)) {
+            return Error{"plan output references unknown tensor " +
+                             std::to_string(output.tensor_id),
+                         -28};
+        }
+    }
+    return plan;
+}
+
+Result<ExecutionPlan> parse_plan_text(const std::string& text) {
+    try {
+        return parse_plan_json(nlohmann::json::parse(text));
+    } catch (const nlohmann::json::exception& error) {
+        return Error{std::string("invalid plan JSON: ") + error.what(), -28};
+    }
 }
 
 }  // namespace forge_rt

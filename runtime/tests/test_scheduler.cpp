@@ -25,15 +25,21 @@
 #include <vector>
 
 using forge_rt::AllocationDefinition;
+using forge_rt::ArtifactDescriptor;
 using forge_rt::Buffer;
+using forge_rt::BufferSpec;
 using forge_rt::DataType;
+using forge_rt::Error;
+using forge_rt::Event;
 using forge_rt::ExecutionPlan;
 using forge_rt::ExecutableNode;
 using forge_rt::LaunchParameters;
 using forge_rt::MemorySpace;
 using forge_rt::MockDeviceProvider;
 using forge_rt::NodeId;
+using forge_rt::Result;
 using forge_rt::Scheduler;
+using forge_rt::TargetKind;
 using forge_rt::TensorDefinition;
 using forge_rt::TensorId;
 
@@ -70,6 +76,18 @@ TensorDefinition MakeTensor(TensorId id, const std::string& name,
     return t;
 }
 
+std::vector<ArtifactDescriptor> MakeArtifacts(std::size_t count) {
+    std::vector<ArtifactDescriptor> artifacts;
+    artifacts.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        ArtifactDescriptor artifact;
+        artifact.target = TargetKind::CPU;
+        artifact.entry_point = "node " + std::to_string(index);
+        artifacts.push_back(std::move(artifact));
+    }
+    return artifacts;
+}
+
 AllocationDefinition MakeAlloc(TensorId id, std::size_t bytes) {
     AllocationDefinition a;
     a.tensor_id = id;
@@ -92,6 +110,16 @@ ExecutableNode MakeNode(NodeId id, std::vector<TensorId> in,
     n.dependencies = std::move(deps);
     n.launch = DefaultLaunch();
     return n;
+}
+
+std::vector<std::string> launch_entries(const std::vector<std::string>& log) {
+    std::vector<std::string> launches;
+    for (const std::string& entry : log) {
+        if (entry.rfind("launch ", 0) == 0) {
+            launches.push_back(entry);
+        }
+    }
+    return launches;
 }
 
 class OffsetRecordingProvider final : public MockDeviceProvider {
@@ -131,6 +159,7 @@ private:
 TEST(ExecutionPlan_json_roundtrip, PlanSurvivesFieldByField) {
     ExecutionPlan p;
     p.name = "fused_mlp_phase1";
+    p.artifacts = MakeArtifacts(8);
 
     // 4 tensors — two externals (x, y), two intermediates.
     p.tensors = {
@@ -172,6 +201,8 @@ TEST(ExecutionPlan_json_roundtrip, PlanSurvivesFieldByField) {
 
     // Structural matches.
     EXPECT_EQ(q.name, p.name);
+    EXPECT_EQ(q.version, p.version);
+    EXPECT_EQ(q.artifacts.size(), p.artifacts.size());
     EXPECT_EQ(q.tensors.size(),     p.tensors.size());
     EXPECT_EQ(q.allocations.size(), p.allocations.size());
     EXPECT_EQ(q.nodes.size(),       p.nodes.size());
@@ -222,6 +253,7 @@ TEST(Scheduler_linear, TwoNodeChainFiresInTopologicalOrder) {
     // node 0 reads 0 and writes 1; node 1 reads 1 and writes 2.
     ExecutionPlan p;
     p.name = "linear";
+    p.artifacts = MakeArtifacts(8);
     p.tensors = {
         MakeTensor(0, "x",   {4}),
         MakeTensor(1, "mid", {4}),
@@ -244,10 +276,10 @@ TEST(Scheduler_linear, TwoNodeChainFiresInTopologicalOrder) {
     auto r = s.execute(p, inputs, outputs);
     ASSERT_TRUE(r.ok()) << r.error().message;
 
-    const auto& log = mock->call_log();
-    ASSERT_EQ(log.size(), 2u);
-    EXPECT_EQ(log[0], "launch node 0");
-    EXPECT_EQ(log[1], "launch node 1");
+    const std::vector<std::string> launches = launch_entries(mock->call_log());
+    ASSERT_EQ(launches.size(), 2u);
+    EXPECT_EQ(launches[0], "launch node 0");
+    EXPECT_EQ(launches[1], "launch node 1");
 }
 
 // ===========================================================================
@@ -258,6 +290,7 @@ TEST(Scheduler_diamond, TopologicalInvariantsOnDiamondDAG) {
     // 5 tensors: x (input), a (out of 0), b (out of 1), c (out of 2), y (out of 3).
     ExecutionPlan p;
     p.name = "diamond";
+    p.artifacts = MakeArtifacts(8);
     p.tensors = {
         MakeTensor(0, "x", {4}),
         MakeTensor(1, "a", {4}),
@@ -284,8 +317,8 @@ TEST(Scheduler_diamond, TopologicalInvariantsOnDiamondDAG) {
     auto r = s.execute(p, inputs, outputs);
     ASSERT_TRUE(r.ok()) << r.error().message;
 
-    const auto& log = mock->call_log();
-    ASSERT_EQ(log.size(), 4u);
+    const std::vector<std::string> launches = launch_entries(mock->call_log());
+    ASSERT_EQ(launches.size(), 4u);
 
     // Convert "launch node N" entries to integers.
     auto node_id = [](const std::string& s) -> int {
@@ -294,7 +327,7 @@ TEST(Scheduler_diamond, TopologicalInvariantsOnDiamondDAG) {
         return std::stoi(s.substr(prefix.size()));
     };
     std::vector<int> order;
-    for (const auto& entry : log) {
+    for (const auto& entry : launches) {
         order.push_back(node_id(entry));
     }
 
@@ -317,6 +350,7 @@ TEST(Scheduler_cycle, ReturnsErrorAndSkipsLaunchOnCyclicPlan) {
     // 2 nodes depending on each other.
     ExecutionPlan p;
     p.name = "cycle";
+    p.artifacts = MakeArtifacts(8);
     p.tensors = {
         MakeTensor(0, "x", {4}),
         MakeTensor(1, "y", {4}),
@@ -354,6 +388,7 @@ TEST(Scheduler_cycle, ReturnsErrorAndSkipsLaunchOnCyclicPlan) {
 TEST(Scheduler, UsesMemoryPlannerAllocations) {
     ExecutionPlan plan;
     plan.name = "fused_mlp_offsets";
+    plan.artifacts = MakeArtifacts(8);
     plan.tensors = {
         MakeTensor(0, "x", {4}),
         MakeTensor(1, "weight", {8}),
@@ -385,10 +420,201 @@ TEST(Scheduler, UsesMemoryPlannerAllocations) {
 
     ASSERT_TRUE(result.ok()) << result.error().message;
     const std::vector<std::string> expected = {
-        "node 0 inputs=128,64,192 outputs=0",
+        "node 0 inputs=0,0,0 outputs=0",
         "node 1 inputs=0 outputs=64",
         "node 2 inputs=64 outputs=0",
     };
     EXPECT_EQ(provider->offset_log(), expected);
-    RecordProperty("offset_log", "128,64,192->0;0->64;64->0");
+    RecordProperty("offset_log", "0,0,0->0;0->64;64->0");
+}
+
+// ===========================================================================
+// 6. Sparse node ids are legal. Tables are keyed by dense tensor slots and
+//    node ids only appear in maps, so a large id cannot index out of bounds.
+// ===========================================================================
+TEST(Scheduler_sparse_ids, LargeNodeIdsRunInDependencyOrder) {
+    ExecutionPlan plan;
+    plan.name = "sparse_ids";
+    plan.artifacts = MakeArtifacts(21);
+    plan.tensors = {
+        MakeTensor(0, "x", {4}),
+        MakeTensor(1, "mid", {4}),
+        MakeTensor(2, "y", {4}),
+    };
+    plan.nodes = {
+        MakeNode(10, {0}, {1}, {}),
+        MakeNode(20, {1}, {2}, {10}),
+    };
+    plan.inputs = {{0, "x"}};
+    plan.outputs = {{2, "y"}};
+
+    auto provider = std::make_shared<MockDeviceProvider>();
+    Scheduler scheduler({provider});
+    std::vector<Buffer> inputs = MakeBuffers<1>();
+    std::vector<Buffer> outputs = MakeBuffers<1>();
+
+    auto result = scheduler.execute(plan, inputs, outputs);
+    ASSERT_TRUE(result.ok()) << result.error().message;
+
+    const std::vector<std::string> launches = launch_entries(provider->call_log());
+    ASSERT_EQ(launches.size(), 2u);
+    EXPECT_EQ(launches[0], "launch node 10");
+    EXPECT_EQ(launches[1], "launch node 20");
+}
+
+// ===========================================================================
+// 7. An artifact reference must resolve. A plan without an artifact table
+//    fails before any allocation or launch.
+// ===========================================================================
+TEST(Scheduler_artifacts, MissingArtifactIsRejected) {
+    ExecutionPlan plan;
+    plan.name = "missing_artifact";
+    plan.tensors = {MakeTensor(0, "x", {4}), MakeTensor(1, "y", {4})};
+    plan.nodes = {MakeNode(0, {0}, {1}, {})};
+    plan.inputs = {{0, "x"}};
+    plan.outputs = {{1, "y"}};
+
+    auto provider = std::make_shared<MockDeviceProvider>();
+    Scheduler scheduler({provider});
+    std::vector<Buffer> inputs = MakeBuffers<1>();
+    std::vector<Buffer> outputs = MakeBuffers<1>();
+
+    auto result = scheduler.execute(plan, inputs, outputs);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.error().code, -18);
+    EXPECT_TRUE(provider->call_log().empty());
+}
+
+// ===========================================================================
+// 8. An undersized external output is rejected before the provider writes.
+// ===========================================================================
+TEST(Scheduler_capacity, UndersizedOutputIsRejected) {
+    ExecutionPlan plan;
+    plan.name = "undersized";
+    plan.artifacts = MakeArtifacts(2);
+    plan.tensors = {MakeTensor(0, "x", {4}), MakeTensor(1, "y", {4})};
+    plan.nodes = {MakeNode(0, {0}, {1}, {})};
+    plan.inputs = {{0, "x"}};
+    plan.outputs = {{1, "y"}};
+
+    BufferSpec in_spec;
+    in_spec.descriptor.dtype = DataType::Float32;
+    in_spec.descriptor.shape = {4};
+    in_spec.byte_size = 16;
+    in_spec.alignment = 4;
+    BufferSpec out_spec = in_spec;
+    out_spec.byte_size = 4;
+
+    std::vector<float> input_storage(4, 1.0f);
+    std::vector<float> output_storage(4, 0.0f);
+    std::vector<Buffer> inputs;
+    inputs.emplace_back(input_storage.data(), in_spec, false);
+    std::vector<Buffer> outputs;
+    outputs.emplace_back(output_storage.data(), out_spec, false);
+
+    auto provider = std::make_shared<MockDeviceProvider>();
+    Scheduler scheduler({provider});
+    auto result = scheduler.execute(plan, inputs, outputs);
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.error().code, -27);
+    EXPECT_TRUE(provider->call_log().empty());
+}
+
+// ===========================================================================
+// 9. In-place nodes keep one buffer. The provider writes through the output
+//    alias and the caller's storage still holds the bytes.
+// ===========================================================================
+class InPlaceWritingProvider final : public MockDeviceProvider {
+public:
+    Result<Event> launch(const ArtifactDescriptor& artifact,
+                         std::span<const Buffer> inputs,
+                         std::span<Buffer> outputs,
+                         std::span<const Event> deps) override {
+        (void)artifact;
+        (void)inputs;
+        (void)deps;
+        if (!outputs.empty() && outputs[0].data() != nullptr) {
+            static_cast<float*>(outputs[0].data())[0] = 7.0f;
+        }
+        Event event{999};
+        event.mark_completed();
+        return event;
+    }
+};
+
+TEST(Scheduler_in_place, OutputAliasKeepsCallerStorage) {
+    ExecutionPlan plan;
+    plan.name = "in_place";
+    plan.artifacts = MakeArtifacts(1);
+    plan.tensors = {MakeTensor(0, "x", {1})};
+    plan.nodes = {MakeNode(0, {0}, {0}, {})};
+    plan.inputs = {{0, "x"}};
+    plan.outputs = {{0, "x"}};
+
+    BufferSpec spec;
+    spec.descriptor.dtype = DataType::Float32;
+    spec.descriptor.shape = {1};
+    spec.byte_size = 4;
+    spec.alignment = 4;
+
+    std::vector<float> storage = {1.0f};
+    std::vector<Buffer> inputs;
+    inputs.emplace_back(storage.data(), spec, false);
+    std::vector<Buffer> outputs;
+    outputs.emplace_back(storage.data(), spec, false);
+
+    auto provider = std::make_shared<InPlaceWritingProvider>();
+    Scheduler scheduler({provider});
+    auto result = scheduler.execute(plan, inputs, outputs);
+
+    ASSERT_TRUE(result.ok()) << result.error().message;
+    EXPECT_FLOAT_EQ(storage[0], 7.0f);
+    EXPECT_EQ(inputs[0].data(), storage.data());
+    EXPECT_EQ(outputs[0].data(), storage.data());
+}
+
+// ===========================================================================
+// 10. A failed launch leaves caller buffers valid and unmoved.
+// ===========================================================================
+class FailingProvider final : public MockDeviceProvider {
+public:
+    Result<Event> launch(const ArtifactDescriptor&, std::span<const Buffer>,
+                         std::span<Buffer>, std::span<const Event>) override {
+        return Error{"intentional launch failure", 999};
+    }
+};
+
+TEST(Scheduler_failure, FailedLaunchPreservesCallerBuffers) {
+    ExecutionPlan plan;
+    plan.name = "failing_launch";
+    plan.artifacts = MakeArtifacts(2);
+    plan.tensors = {MakeTensor(0, "x", {1}), MakeTensor(1, "y", {1})};
+    plan.nodes = {MakeNode(0, {0}, {1}, {})};
+    plan.inputs = {{0, "x"}};
+    plan.outputs = {{1, "y"}};
+
+    BufferSpec spec;
+    spec.descriptor.dtype = DataType::Float32;
+    spec.descriptor.shape = {1};
+    spec.byte_size = 4;
+    spec.alignment = 4;
+
+    std::vector<float> input_storage = {1.0f};
+    std::vector<float> output_storage = {0.0f};
+    std::vector<Buffer> inputs;
+    inputs.emplace_back(input_storage.data(), spec, false);
+    std::vector<Buffer> outputs;
+    outputs.emplace_back(output_storage.data(), spec, false);
+
+    auto provider = std::make_shared<FailingProvider>();
+    Scheduler scheduler({provider});
+    auto result = scheduler.execute(plan, inputs, outputs);
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.error().code, -30);
+    EXPECT_EQ(inputs[0].data(), input_storage.data());
+    EXPECT_EQ(outputs[0].data(), output_storage.data());
+    EXPECT_EQ(inputs[0].spec().byte_size, 4u);
+    EXPECT_EQ(outputs[0].spec().byte_size, 4u);
 }

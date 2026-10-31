@@ -27,6 +27,7 @@ import math
 import numpy as np
 import pytest
 import torch
+
 from forge_torch.backend import compile
 from forge_torch.conftest import FusedMLP
 from forge_torch.validation import TOLERANCES

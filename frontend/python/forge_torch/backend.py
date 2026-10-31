@@ -1,6 +1,6 @@
-"""ForgeStack ``torch.compile`` backend hook (Tasks 8 + 14, Phase 1).
+"""Sparrow ``torch.compile`` backend hook (Tasks 8 + 14, Phase 1).
 
-Spec §3 says ForgeTorch has six jobs:
+Spec §3 says Sparrow frontend has six jobs:
 
 1. graph capture
 2. input metadata extraction
@@ -21,6 +21,10 @@ stub the shipped test suite exercises.
 from __future__ import annotations
 
 import hashlib
+import importlib
+import os
+import platform
+import re
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,11 +39,16 @@ from forge_torch.fx_importer import FxImporter
 from forge_torch.op_mapping import normalize_target
 from forge_torch.report import CompilationReport
 
-BACKEND = "forgestack"
+BACKEND = "sparrow"
 
-# Fixed path shared by Tasks 13/14/15 so the smoke test always reads the
-# last write (per Task 14 brief).
-REPORT_PATH = Path(".omo/evidence/phase1-report.txt")
+# The C++ fused kernel is a naive triple loop. Above this many
+# multiply-adds the native path falls back to eager instead of turning a
+# quick demo into a multi-minute stall. 1 << 27 is about 134M MACs.
+_NATIVE_MAX_MULTIPLY_ADDS: Final = 1 << 27
+
+# Report output path. It lives under the ignored cache root because the
+# report is diagnostic output, not a tracked artifact.
+REPORT_PATH = Path(".cache/sparrow/reports/phase1-report.txt")
 
 # ---------------------------------------------------------------------------
 # Phase 7 capability check helpers (Task 5, spec §6).
@@ -123,36 +132,37 @@ def compile(
     cache_store: CacheStore | None = None,
     target: str = "triton",
 ) -> CompiledFusedMLP:
-    """Compile a PyTorch model using ``torch.compile(backend="forgestack")`` semantics.
+    """Import a PyTorch model, cache its MLIR, and return a callable.
 
-    Phase 1 captures the FX graph, runs :class:`FxImporter` to obtain
-    ``forge.graph`` MLIR, consults the two-tier cache (Task 14 / spec
-    §13), and returns a :class:`CompiledFusedMLP` that delegates to
-    eager. On cache miss we also build + emit the spec §16 observability
-    report to :data:`REPORT_PATH` so the Phase 1 smoke test can read it.
+    This is not a registered ``torch.compile`` backend. The function
+    captures the FX graph, runs :class:`FxImporter` to obtain MLIR,
+    consults the two-tier cache, and returns a :class:`CompiledFusedMLP`.
+    When the optional ``_sparrow_rt`` extension is importable and the graph
+    is the fused MLP pattern, the callable runs the native kernel and
+    reports ``lowered=True``. Otherwise it delegates to eager PyTorch and
+    reports ``lowered=False``. On a cache miss the function also emits the
+    observability report to :data:`REPORT_PATH` and attaches it to the
+    callable.
 
-    The lowered-execution path lands once ForgeRT (Tasks 10-12) and the
-    Phase-2 partitioner are in place.
-
-    ``target`` selects the backend for the Phase 7 capability check
-    (Task 5). One :class:`UserWarning` is emitted per op in the captured
-    FX graph that ``target``'s :class:`BackendCapabilities` does not
-    cover; compilation proceeds regardless (the warning is the
-    partitioner's "reroute me" signal, not a hard failure). Existing
-    Phase 1-8 callers that omit ``target=`` get the previous behaviour
-    (``"triton"``).
+    ``target`` selects the backend for the capability check. One
+    :class:`UserWarning` is emitted per captured op that the target's
+    :class:`BackendCapabilities` does not cover. The warning is
+    advisory; compilation proceeds.
     """
     gm = torch.fx.symbolic_trace(model)
     _check_target_capabilities(target, _fx_ops_to_forge_tensor_ops(gm))
     importer = FxImporter(example_inputs)
     mlir_text = importer.import_graph(gm)
 
+    native_runner = _native_runner_for(gm, example_inputs)
+    execution_path = "native" if native_runner is not None else "eager"
+
     cache_store = cache_store if cache_store is not None else CacheStore()
     graph_hash = hashlib.sha256(mlir_text.encode()).hexdigest()
     key = make_cache_key(
         graph_hash=graph_hash,
         target=target,
-        arch="x86_64_v3",
+        arch=_detect_arch(),
         dtype=_infer_dtype_token(example_inputs),
         shape_constraints="static",
         schedule="schedule_64x128x32",
@@ -160,10 +170,23 @@ def compile(
 
     artifact = cache_store.get(key)
     cache_hit = artifact is not None
+    report: CompilationReport | None = None
     if not cache_hit:
-        artifact = _build_artifact(mlir_text, model)
+        artifact = _build_artifact(
+            mlir_text,
+            model,
+            target=target,
+            execution_path=execution_path,
+        )
         cache_store.put(key, artifact)
-        report = _build_report(model, gm, mlir_text, target=target)
+        report = _build_report(
+            model,
+            gm,
+            mlir_text,
+            target=target,
+            execution_path=execution_path,
+            generated_kernels=1 if native_runner is not None else None,
+        )
         _emit_report(report)
 
     return CompiledFusedMLP(
@@ -173,6 +196,8 @@ def compile(
         cache_key=key,
         cache_hit=cache_hit,
         cache_store=cache_store,
+        report=report,
+        native_runner=native_runner,
     )
 
 
@@ -184,26 +209,30 @@ def compile_fused_mlp(
 
 
 # ---------------------------------------------------------------------------
-# Validation result (lightweight stub — Task 13 owns the formal harness)
+# Validation result (shared by the eager and native paths)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class ValidationResult:
-    """Lightweight differential-validation result.
+    """Differential-validation result with an explicit execution path.
 
-    Phase 1 only runs eager-vs-eager (because ``CompiledFusedMLP.__call__``
-    itself delegates to eager); Task 13 will replace this with the real
-    kernel-output comparison. The fields are kept stable so the spec §16
-    compilation report can carry ``validation_max_error`` without churn.
+    The shipped eager path compares eager output to eager output. The
+    fields say so; callers must not read ``passed`` as proof that a
+    lowered kernel ran.
     """
 
     passed: bool
     max_error: float
     reference: str = "eager"
+    execution: str = "eager"
+    lowered: bool = False
 
     def __str__(self) -> str:  # pragma: no cover — debug helper
-        return f"ValidationResult(passed={self.passed}, max_error={self.max_error:.6f})"
+        return (
+            f"ValidationResult(passed={self.passed}, max_error={self.max_error:.6f}, "
+            f"execution={self.execution!r})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +259,10 @@ class CompiledFusedMLP:
 
     #: True iff the instance came back from :func:`compile` (vs. raw eager).
     compiled: bool = True
+    #: ``eager`` until a lowered callable replaces ``__call__``.
+    execution: str = "eager"
+    #: True only when ``__call__`` runs a lowered artifact.
+    lowered: bool = False
 
     def __init__(
         self,
@@ -240,6 +273,8 @@ class CompiledFusedMLP:
         cache_key=None,
         cache_hit: bool = False,
         cache_store: CacheStore | None = None,
+        report: CompilationReport | None = None,
+        native_runner=None,
     ) -> None:
         self.model = model
         self.example_inputs = example_inputs
@@ -247,32 +282,58 @@ class CompiledFusedMLP:
         self.cache_key = cache_key
         self.cache_hit = cache_hit
         self.cache_store = cache_store
+        self.report = report
+        self._native_runner = native_runner
+        self.lowered = native_runner is not None
+        self.execution = "native" if self.lowered else "eager"
 
     def __call__(self, *args: torch.Tensor) -> torch.Tensor:
-        # PHASE 1 NOTE: This compiled() call delegates to the eager kernel
-        # because the pybind11 binding to the C++ TritonProvider is a Phase
-        # 5 deliverable. The C++ path itself is fully exercised by
-        # runtime/tests/test_triton_provider (Task 11) and
-        # runtime/tests/test_scheduler (Task 12). The validation harness
-        # here proves that the end-to-end pipeline returns the same
-        # numerical result as eager.
+        if self._native_runner is not None and len(args) == 3:
+            x, weight, bias = args
+            if (
+                x.dim() == 3
+                and weight.dim() == 2
+                and bias.dim() == 1
+                and x.dtype == torch.float32
+                and weight.dtype == torch.float32
+                and bias.dtype == torch.float32
+                and x.shape[-1] == weight.shape[0]
+                and bias.shape[0] == weight.shape[1]
+            ):
+                flat = x.reshape(-1, x.shape[-1]).contiguous()
+                out = self._native_runner(
+                    flat.detach().cpu().numpy(),
+                    weight.detach().cpu().numpy(),
+                    bias.detach().cpu().numpy(),
+                )
+                return torch.from_numpy(out).reshape(*x.shape[:-1], weight.shape[1])
+            warnings.warn(
+                "native fused MLP path requires rank-3 fp32 x, rank-2 fp32 weight, "
+                "and rank-1 fp32 bias; running eager instead",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return self.model(*args)
 
     def validate(self, *, atol: float = 1e-5, rtol: float = 1e-5) -> ValidationResult:
         """Compare ``self(*example_inputs)`` against eager.
 
-        Phase-1 stub: the compiled stub is itself eager, so this is
-        effectively eager-vs-eager (max error ~ 0). Task 13 will swap
-        in the formal differential harness once the lowered runtime is
-        live; the return type is stable.
+        When ``lowered`` is false this compares eager to eager and the
+        result names the eager execution path. The native path replaces
+        this comparison with a real kernel-vs-eager check.
         """
         eager_out = self.model(*self.example_inputs)
         compiled_out = self(*self.example_inputs)
         diff = (eager_out - compiled_out).abs()
         max_error = float(diff.max().item()) if diff.numel() else 0.0
+        if self.report is not None:
+            self.report.validation_max_error = max_error
+            self.report.execution_path = self.execution
         return ValidationResult(
             passed=torch.allclose(compiled_out, eager_out, atol=atol, rtol=rtol),
             max_error=max_error,
+            execution=self.execution,
+            lowered=self.lowered,
         )
 
 
@@ -281,17 +342,41 @@ class CompiledFusedMLP:
 # ---------------------------------------------------------------------------
 
 
+def _detect_arch() -> str:
+    """Return the host architecture token used in the cache key.
+
+    The compiler does not emit machine code yet, but the key must still
+    differ between hosts. An explicit ``SPARROW_ARCH`` wins.
+    """
+    override = os.environ.get("SPARROW_ARCH")
+    if override:
+        return override
+    machine = platform.machine().lower()
+    aliases = {
+        "x86_64": "x86_64_v3",
+        "amd64": "x86_64_v3",
+        "arm64": "aarch64",
+    }
+    return aliases.get(machine, machine or "unknown")
+
+
 def _infer_dtype_token(example_inputs: list[torch.Tensor]) -> str:
-    """Map the example tensors' dtype to the spec §13 cache key spelling."""
-    if not example_inputs:
-        return "fp32"
-    dt = example_inputs[0].dtype
+    """Map every example tensor's dtype to the spec §13 cache key spelling.
+
+    A mixed-precision call must not share a cache entry with a uniform
+    one, so the token is the ordered unique set joined by ``+``.
+    """
     mapping = {
         torch.float32: "fp32",
         torch.float16: "fp16",
         torch.bfloat16: "bf16",
     }
-    return mapping.get(dt, "fp32")
+    tokens: list[str] = []
+    for tensor in example_inputs:
+        token = mapping.get(tensor.dtype, "fp32")
+        if token not in tokens:
+            tokens.append(token)
+    return "+".join(tokens) if tokens else "fp32"
 
 
 def _count_fx_nodes(gm: torch.fx.GraphModule) -> int:
@@ -304,15 +389,30 @@ def _count_fx_nodes(gm: torch.fx.GraphModule) -> int:
     return count
 
 
-def _count_mlir_ops(mlir_text: str, op_prefix: str) -> int:
-    """Count ``<op_prefix>`` occurrences in the textual MLIR."""
-    return mlir_text.count(op_prefix)
+_FORGE_OP_RE: Final = re.compile(r"\bforge\.(?:graph|tensor)\.[a-z_]+")
 
 
-def _build_artifact(mlir_text: str, model: torch.nn.Module) -> dict:
+def _count_mlir_ops(mlir_text: str) -> int:
+    """Count forge operation names in the textual MLIR.
+
+    Types such as ``!forge.tensor<...>`` are excluded, so the count is
+    operations, not mentions of the dialect.
+    """
+    return len(_FORGE_OP_RE.findall(mlir_text))
+
+
+def _build_artifact(
+    mlir_text: str,
+    model: torch.nn.Module,
+    *,
+    target: str = "triton",
+    execution_path: str = "eager",
+) -> dict:
     """Bundle the per-key data persisted to ``artifact.json``."""
     return {
         "model_name": model.__class__.__name__,
+        "execution_path": execution_path,
+        "target": target,
         "mlir_text": mlir_text,
         "schedule": {
             "tile_m": 64,
@@ -330,19 +430,22 @@ def _build_report(
     mlir_text: str,
     *,
     target: str = "triton",
+    execution_path: str = "eager",
+    generated_kernels: int | None = None,
 ) -> CompilationReport:
-    """Populate a :class:`CompilationReport` with Phase-1 FusedMLP numbers."""
+    """Populate the measured fields; leave unmeasured fields as ``None``."""
     model_name = model.__class__.__name__
-    imported = _count_mlir_ops(mlir_text, "forge.graph.")
+    imported = _count_mlir_ops(mlir_text)
     return CompilationReport(
         model_name=model_name,
+        execution_path=execution_path,
         captured_fx_nodes=_count_fx_nodes(gm),
         imported_mlir_operations=imported,
         operations_after_canonicalize=imported,  # canonicalize is a no-op in Phase 1
-        fusion_groups=1,
+        fusion_groups=None,
         selected_target=target,
-        alternative_astra_cost="1.31x",
-        alternative_fpga_cost="2.04x including transfer",
+        alternative_astra_cost=None,
+        alternative_fpga_cost=None,
         schedule={
             "tile_m": 64,
             "tile_n": 128,
@@ -350,10 +453,10 @@ def _build_report(
             "warps": 8,
             "stages": 4,
         },
-        original_intermediate_memory_mb=45.0,  # [2,512,11008] fp32 = ~45 MB
-        planned_intermediate_memory_mb=8.0,
-        generated_kernels=1,
-        validation_max_error=0.0,  # populated by validate() (Task 13)
+        original_intermediate_memory_mb=None,
+        planned_intermediate_memory_mb=None,
+        generated_kernels=generated_kernels,
+        validation_max_error=None,
     )
 
 
@@ -365,3 +468,47 @@ def _emit_report(report: CompilationReport) -> None:
     """
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(report.render() + "\n")
+
+
+def _native_runner_for(
+    gm: torch.fx.GraphModule,
+    example_inputs: list[torch.Tensor],
+):
+    """Return ``_sparrow_rt.run_fused_mlp`` for the fused MLP shape only.
+
+    The pattern is one matmul, one add, and one gelu with a rank-3 x, a
+    rank-2 weight, and a rank-1 bias, all fp32. Anything else returns
+    ``None`` and keeps the eager path.
+    """
+    if len(example_inputs) != 3:
+        return None
+    x, weight, bias = example_inputs
+    if (
+        x.dim() != 3
+        or weight.dim() != 2
+        or bias.dim() != 1
+        or x.dtype != torch.float32
+        or weight.dtype != torch.float32
+        or bias.dtype != torch.float32
+        or x.shape[-1] != weight.shape[0]
+        or bias.shape[0] != weight.shape[1]
+    ):
+        return None
+
+    multiply_adds = int(x.shape[0]) * int(x.shape[1]) * int(weight.shape[0]) * int(weight.shape[1])
+    if multiply_adds > _NATIVE_MAX_MULTIPLY_ADDS:
+        return None
+
+    targets: list[str] = []
+    for node in gm.graph.nodes:
+        if node.op == "call_function":
+            targets.append(normalize_target(node.target))
+    if sorted(targets) != ["aten.add", "aten.gelu", "aten.matmul"]:
+        return None
+
+    try:
+        module = importlib.import_module("_sparrow_rt")
+    except ImportError:
+        return None
+    runner = getattr(module, "run_fused_mlp", None)
+    return runner if callable(runner) else None

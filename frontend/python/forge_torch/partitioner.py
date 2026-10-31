@@ -26,13 +26,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Final
 
 from torch.fx import Node
 
 from forge_torch.capabilities import BackendCapabilities
 from forge_torch.cost_estimator import CostEstimate, estimate_cost
+from forge_torch.lowerings import COMPILER_LOWERINGS
 
 # ---------------------------------------------------------------------------
 # Per-op shape defaults for cost estimation.
@@ -165,10 +166,16 @@ def _node_cost_shape(node: Node, op_name: str) -> list[int]:
     return list(_DEFAULT_COST_SHAPE.get(op_name, [1, 1]))
 
 
+class UnsupportedRegionError(ValueError):
+    """Raised when no backend can lower every op in a region."""
+
+
 def partition(
     regions: Sequence[Sequence[Node]],
     capabilities: dict[str, BackendCapabilities],
     cost_estimator: Callable[[Sequence[dict], str], CostEstimate] = estimate_cost,
+    *,
+    lowerings: Mapping[str, frozenset[str]] | None = None,
 ) -> list[tuple[list[Node], str]]:
     """Pick the cheapest valid backend per region (spec §6 greedy).
 
@@ -179,9 +186,17 @@ def partition(
     :func:`forge_torch.cost_estimator.estimate_cost` but can be overridden
     in tests.
 
+    ``lowerings`` maps a backend name to the ops the compiler can emit.
+    It defaults to :data:`forge_torch.lowerings.COMPILER_LOWERINGS`, which
+    is empty until a region codegen lands. A caller that is testing the
+    selection algorithm can pass a wider map.
+
     Returns a ``list[tuple[list[FXNode], str]]`` parallel to ``regions``:
-    each element is ``(region_nodes, chosen_backend_name)``.
+    each element is ``(region_nodes, chosen_backend_name)``. Raises
+    :class:`UnsupportedRegionError` when a region has no mappable op or
+    no backend covers every op in both the capability and lowering sets.
     """
+    lowering_map = COMPILER_LOWERINGS if lowerings is None else lowerings
     result: list[tuple[list[Node], str]] = []
     for region in regions:
         node_list = list(region)
@@ -195,15 +210,16 @@ def partition(
             region_dicts.append({"op": op_name, "shape": _node_cost_shape(node, op_name)})
 
         if not region_op_names:
-            # No mappable ops — default to triton (superset target). The
-            # caller can further inspect ``result`` to override.
-            result.append((node_list, "triton"))
-            continue
+            raise UnsupportedRegionError(
+                "region has no mappable forge.tensor op; cannot choose a backend"
+            )
 
-        # Score each candidate backend.
+        # Score each candidate backend. A backend must cover the op set in
+        # both what it can run and what the compiler can emit.
         candidates: list[tuple[int, str]] = []
         for backend_name, caps in capabilities.items():
-            if not region_op_names.issubset(caps.supported_ops):
+            emitted = lowering_map.get(backend_name, frozenset())
+            if not region_op_names.issubset(caps.supported_ops & emitted):
                 continue
             if not region_dicts:
                 # Region has op names but no cost dicts (e.g. all nodes
@@ -215,10 +231,9 @@ def partition(
             candidates.append((cost.compute_cycles, backend_name))
 
         if not candidates:
-            # No backend covers all region ops — fall back to triton
-            # (superset capability).
-            result.append((node_list, "triton"))
-            continue
+            raise UnsupportedRegionError(
+                f"no backend covers region ops {sorted(region_op_names)} with a compiler lowering"
+            )
 
         # Sort by (cycles, backend_name); lowest wins. The tuple sort is
         # stable and the backend_name tiebreak is alphabetical per spec §6.
@@ -229,6 +244,7 @@ def partition(
 
 
 __all__ = (
+    "UnsupportedRegionError",
     "map_node_to_forge_op",
     "partition",
 )

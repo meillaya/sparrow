@@ -1,1 +1,1 @@
-# compiler/lib — ForgeStack xDSL dialect + pass library.
+# compiler/lib — Sparrow xDSL dialect + pass library.

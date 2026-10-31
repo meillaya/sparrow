@@ -1,1 +1,1 @@
-# compiler — ForgeStack xDSL compiler front-end.
+# compiler — Sparrow xDSL compiler front-end.

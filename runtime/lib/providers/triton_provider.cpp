@@ -180,6 +180,16 @@ Result<Event> TritonProvider::launch(const ArtifactDescriptor& artifact,
                      2027};
     }
 
+    const uint64_t required_output_bytes =
+        static_cast<uint64_t>(M) * static_cast<uint64_t>(N) * sizeof(float);
+    if (outputs[0].spec().byte_size < required_output_bytes) {
+        return Error{"TritonProvider::launch: output buffer is " +
+                         std::to_string(outputs[0].spec().byte_size) +
+                         " bytes, kernel needs " +
+                         std::to_string(required_output_bytes),
+                     2030};
+    }
+
     // Build the kernel input struct and dispatch.
     backends::triton::cpu::FusedGemmBiasGeluInputs kern{};
     kern.x = static_cast<const float*>(inputs[0].data());

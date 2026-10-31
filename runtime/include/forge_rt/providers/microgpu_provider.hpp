@@ -25,6 +25,7 @@
 //     and pipes a JSON spec (input tensors + bytecode words) in.
 //     stdout carries a base64 payload for the resulting tensor.
 
+#include <atomic>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -72,7 +73,7 @@ public:
 
 private:
     // Monotonic event-id source (mirrors Triton's pattern).
-    uint64_t next_event_id_ = 1;
+    std::atomic<uint64_t> next_event_id_{1};
 
     // Resolved at construction; may be empty, in which case launch()
     // falls back to `python3`. The string is owned by the provider.

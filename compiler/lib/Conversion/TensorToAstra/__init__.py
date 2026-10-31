@@ -50,7 +50,7 @@
 # leaving the op as-is (Task 42 spec: "rejects ops that don't have astra
 # equivalents").
 #
-# See `.omo/notepads/forgestack/learnings.md` §(h) for the Wave 0
+# See the phase 7 notes for the Wave 0
 # learnings that informed the pattern-rewriter style below — most
 # notably the ``apply_recursively=False`` choice that keeps the walker's
 # debug output clean.
@@ -550,11 +550,17 @@ class TensorToAstraPass(ModulePass):
     name = "tensor-to-astra"
 
     def apply(self, ctx: Context, op: ModuleOp) -> None:
-        # The driver (`forge-opt --action=lower-astra`) is responsible
-        # for loading the arith dialect — we don't reload it here to
-        # avoid the "already registered" exception when run after the
-        # pass was already entered from the driver's pipeline.
+        raise VerifyException(
+            "TensorToAstra is unavailable: the astra dialect cannot represent "
+            "SRAM addresses, the conversion cannot recover gemm and epilogue "
+            "shapes after lowering, and the 15-bit DMA immediate cannot carry "
+            "the real byte counts. The dialect and simulator remain for "
+            "research; no compiler lowering is shipped."
+        )
 
+        # The code below is kept for the Astra v2 design. It is not
+        # reachable until the pass gains address attributes, a layout
+        # side table, and chunked DMA.
         walker = PatternRewriteWalker(
             GreedyRewritePatternApplier(
                 [

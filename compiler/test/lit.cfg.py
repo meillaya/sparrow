@@ -1,12 +1,11 @@
-# lit.cfg.py — ForgeStack compiler/test lit configuration.
+# lit.cfg.py — Sparrow compiler/test lit configuration.
 #
 # Runs the FileCheck-driven `.mlir` tests under `compiler/test/`. The
-# `test_source_root = HERE` setting below makes lit recursively
-# discover every ``.mlir`` file under the test tree — currently
-# ``Dialect/{Graph,Tensor,Schedule}``, ``Conversion/GraphToTensor``,
-# and (Phase 2) ``Transforms/{Canonicalize,ShapeInference,Fuse}``.
-# Each test file uses `// RUN:` lines to invoke `forge-opt` and pipe
-# its output through FileCheck.
+# `test_source_root = HERE` setting makes lit discover every ``.mlir``
+# file under the test tree, including the five dialects, the two
+# conversions, the three transforms, and the TensorToAstra rejection case.
+# Each test file uses `// RUN:` lines to invoke `forge-opt` and pipe its
+# output through FileCheck.
 
 # ruff: noqa: F821  (lit injects `config` at load time; F821 is the
 # "undefined name" rule that fires on `config.x = ...` assignments below)
@@ -14,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -42,7 +42,7 @@ def _resolve_python() -> str:
     return sys.executable
 
 
-config.name = "forgestack-compiler"
+config.name = "sparrow-compiler"
 config.suffixes = [".mlir"]
 config.test_format = lit.formats.ShTest()
 config.test_source_root = str(HERE)
@@ -60,10 +60,16 @@ config.excludes = []
 config.python_executable = _resolve_python()
 
 # `%forge-opt` runs our driver on the test file; `%FileCheck` uses the
-# system binary. Phase 1 installs FileCheck via apt / Nix; if it is not on
-# PATH, lit's resolver surfaces an UNSUPPORTED status rather than silently
-# passing the test.
+# binary on PATH. A missing FileCheck is a hard test failure, so the
+# config prints the reason before lit reports it.
+filecheck = shutil.which("FileCheck")
+if filecheck is None:
+    print(
+        "lit.cfg.py: FileCheck is not on PATH; install LLVM or export the "
+        "LLVM bin directory before running the compiler tests",
+        file=sys.stderr,
+    )
 config.substitutions = [
     ("%forge-opt", f'"{config.python_executable}" "{FORGE_OPT}"'),
-    ("%FileCheck", "FileCheck"),
+    ("%FileCheck", filecheck or "FileCheck"),
 ]

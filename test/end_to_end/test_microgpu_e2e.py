@@ -1,6 +1,6 @@
 """End-to-end FusedMLP-on-microgpu pytest (Phase 8, Task 81 / Wave 17).
 
-Confirms the ForgeStack end-to-end pipeline — FX capture, MLIR import,
+Confirms the Sparrow end-to-end pipeline — FX capture, MLIR import,
 cache key, ``compile()`` returning a callable — produces a tensor that
 matches eager within fp32 atol=1e-4 on the canonical Phase 1 FusedMLP
 shape ``(B, S, K) @ (K, N) + (N) -> GELU``.
@@ -28,11 +28,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from forge_torch.backend import compile
-from forge_torch.conftest import FusedMLP
 
 from backends.microgpu.asm import assemble
 from backends.microgpu.interp import BYTES_PER_WORD, run
+from forge_torch.backend import compile
+from forge_torch.conftest import FusedMLP
 
 # Same canonical Phase 1 shape set used by ``test_astra_e2e`` / ``test_cross_provider``
 # (spec §19) — keeping the parametrization identical across e2e files makes the

@@ -1,4 +1,4 @@
-"""ForgeStack compilation report pytest tests (Task 14, spec §16).
+"""Sparrow compilation report pytest tests (Task 14, spec §16).
 
 Four tests pin the :class:`forge_torch.report.CompilationReport` contract:
 
@@ -23,6 +23,7 @@ from frontend.python.forge_torch.report import CompilationReport
 # truncation when someone edits the render() template.
 REQUIRED_SECTIONS = [
     "Model:",
+    "Execution path:",
     "Captured FX nodes:",
     "Imported MLIR operations:",
     "Operations after canonicalize:",
@@ -65,6 +66,7 @@ def _populated_report() -> CompilationReport:
     )
     return CompilationReport(
         model_name="FusedMLP",
+        execution_path="eager",
         captured_fx_nodes=3,
         imported_mlir_operations=3,
         operations_after_canonicalize=3,
@@ -86,7 +88,7 @@ def _populated_report() -> CompilationReport:
 
 
 def test_report_render_contains_required_sections() -> None:
-    """All 18 spec §16 section headings appear in the rendered output."""
+    """All section headings, including the execution path, appear in the rendered output."""
     report = _populated_report()
     rendered = report.render()
     missing = [section for section in REQUIRED_SECTIONS if section not in rendered]
@@ -105,6 +107,7 @@ def test_report_roundtrip_json() -> None:
 
     for field_name in (
         "model_name",
+        "execution_path",
         "captured_fx_nodes",
         "imported_mlir_operations",
         "operations_after_canonicalize",
@@ -135,11 +138,13 @@ def test_report_default_values() -> None:
     assert "warps:                        -" in rendered
     assert "stages:                       -" in rendered
 
-    # Numeric defaults are 0 / 0.0 and render as 0.0 / 0.
+    # Measured counts default to 0. Fields that were never measured render
+    # as unavailable rather than as fabricated numbers.
     assert "Captured FX nodes:              0" in rendered
-    assert "Fusion groups:                  0" in rendered
-    assert "Generated kernels:               0" in rendered
-    assert "Original intermediate memory:   0.0 MB" in rendered
+    assert "Fusion groups:                  unavailable" in rendered
+    assert "Generated kernels:               unavailable" in rendered
+    assert "Original intermediate memory:   unavailable" in rendered
+    assert "Validation max error:            unavailable" in rendered
 
 
 def test_report_validation_max_error_format() -> None:

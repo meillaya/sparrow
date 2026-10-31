@@ -12,6 +12,6 @@ pkgs.mkShell {
     pybind11
   ]);
   shellHook = ''
-    echo "ForgeStack Phase 1 dev environment activated (shell.nix fallback)"
+    echo "Sparrow Phase 1 dev environment activated (shell.nix fallback)"
   '';
 }

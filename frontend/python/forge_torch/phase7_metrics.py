@@ -4,7 +4,10 @@ The spec §19 demo requires a single comparison table that captures the
 6 metrics (``latency_us``, ``peak_memory_mb``, ``kernel_count``,
 ``data_transferred_mb``, ``compile_time_ms``, ``numerical_error_max``)
 for each of the three configurations (A / B / C) the heterogeneous
-partitioner dispatches.
+partitioner dispatches. This module is a **planning estimate**: memory
+and transfer values come from shapes and per-backend multipliers, not
+from a lowered execution. ``Metrics.estimated`` says so, and
+``MetricsTable.render`` adds a footnote.
 
 This module is the canonical source of those 6 fields. The five Phase
 7 e2e tests (Tasks 21-23 + the 4-case metrics-table test in Task 24)
@@ -88,6 +91,8 @@ class Metrics:
     data_transferred_mb: float
     compile_time_ms: float
     numerical_error_max: float
+    #: True while memory and transfer values are analytical estimates.
+    estimated: bool = True
 
     def __post_init__(self) -> None:
         # Sentinel check: a NaN or negative value indicates the metric
@@ -174,7 +179,11 @@ class MetricsTable:
             "| Config B | " + " | ".join(_format(b) for _, _, b, _ in rows) + " |",
             "| Config C | " + " | ".join(_format(c) for _, _, _, c in rows) + " |",
         ]
-        return "\n".join([header, separator, *body_lines]) + "\n"
+        note = (
+            "\nEstimated fields: peak_memory_mb, data_transferred_mb. "
+            "No lowered execution produced these values.\n"
+        )
+        return "\n".join([header, separator, *body_lines]) + "\n" + note
 
 
 def _format(value: float) -> str:
@@ -280,6 +289,7 @@ def metrics_table(
         data_transferred_mb=data_transferred_mb,
         compile_time_ms=compile_time_ms,
         numerical_error_max=numerical_error_max,
+        estimated=True,
     )
 
 

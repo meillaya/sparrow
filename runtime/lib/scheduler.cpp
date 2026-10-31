@@ -1,36 +1,32 @@
 // ForgeRT — topological scheduler (spec §10).
-// Holds a vector of DeviceProviders (indexed by ExecutableNode::device)
-// and walks an ExecutionPlan in Kahn's topological order. For each
-// node in topo order: gather the inputs (a slice of the live buffer
-// table) and the upstream events (a slice of the live event table),
-// dispatch to the matching provider via DeviceProvider::launch, and
-// publish the resulting event into the table for downstream nodes.
 //
-// Implementation notes:
+// Execution has four phases:
+//   1. Validate the plan: ids, arity, artifact references, providers.
+//   2. Compute the topological order once.
+//   3. Plan liveness and buffer reuse in that order, then allocate every
+//      intermediate tensor through the provider for its memory space.
+//   4. Walk the order, build non-owning aliases for each node's inputs and
+//      outputs, check output capacity, resolve the real artifact, and
+//      launch.
 //
-// * We use Kahn's algorithm with a NodeId-indexed in-degree table.
-//   The "reverse" edges (depender → dependees) are precomputed so
-//   the inner loop is O(degree) without any hash lookups.
-//
-// * The two dense tables (TensorId → Buffer, TensorId → Event) are
-//   sized once from plan.tensors.size() so the hot path is just
-//   `buffer_table[tid]` / `event_table[tid]` — no hash lookup.
-//
-// * Per-node I/O buffers are moved into a temporary std::vector<Buffer>
-//   for the duration of `provider->launch` (because std::span needs a
-//   contiguous range of T, and the table is non-contiguous). They
-//   are moved back into the table after the launch, so downstream
-//   nodes see the same in-place mutation the provider made. For the
-//   shipped host stub the buffers are essentially handle-swaps, so the
-//   extra move is free.
+// The scheduler never moves caller buffers. External inputs and outputs
+// stay owned by the caller and are aliased into the live table; owned
+// buffers exist only for intermediates. A failed run therefore leaves
+// every caller buffer valid.
 #include "forge_rt/scheduler.hpp"
 
 #include "forge_rt/artifact_descriptor.hpp"
 #include "forge_rt/memory_planner.hpp"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <deque>
+#include <memory>
 #include <span>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -39,27 +35,91 @@ namespace forge_rt {
 Scheduler::Scheduler(std::vector<std::shared_ptr<DeviceProvider>> providers)
     : providers_(std::move(providers)) {}
 
-// ---------------------------------------------------------------------------
-// Internal helpers — file-local so we don't widen the public surface.
-// ---------------------------------------------------------------------------
 namespace {
 
-inline std::size_t table_size(const ExecutionPlan& plan) {
-    // Dense-vector sizing. We deliberately use the plan's published
-    // count rather than the max id so callers can't blow up the
-    // table with a sparse TensorId namespace; range checks happen at
-    // every access below.
-    const std::size_t t = plan.tensors.size();
-    const std::size_t n = plan.nodes.size();
-    return (t > n ? t : n) + 1;
+Error error(std::string message, int code) {
+    return Error{std::move(message), code};
 }
 
-// Sentinel Error used by the topological-sort failure path. The
-// `code` (-20) is negative so callers can recognise it as "the plan
-// itself is invalid" rather than "the runtime tripped".
-Error cycle_error() {
-    return Error{"topological sort failed: cycle detected (or unsatisfied dependency)",
-                 -20};
+// Kahn's algorithm over the plan's node graph. Returns NodeIds in a
+// deterministic order: ready nodes are seeded and appended in plan order.
+Result<std::vector<NodeId>> topological_order(
+    const ExecutionPlan& plan,
+    const std::unordered_map<NodeId, std::size_t>& node_index) {
+    std::unordered_map<NodeId, std::size_t> in_degree;
+    std::unordered_map<NodeId, std::vector<NodeId>> successors;
+    in_degree.reserve(node_index.size() * 2 + 1);
+    successors.reserve(node_index.size() * 2 + 1);
+
+    for (const ExecutableNode& node : plan.nodes) {
+        in_degree.emplace(node.id, 0);
+        successors.emplace(node.id, std::vector<NodeId>{});
+    }
+    for (const ExecutableNode& node : plan.nodes) {
+        for (const NodeId dependency : node.dependencies) {
+            if (!node_index.contains(dependency)) {
+                return error("node " + std::to_string(node.id) +
+                                 " depends on unknown node " +
+                                 std::to_string(dependency),
+                             -15);
+            }
+            successors[dependency].push_back(node.id);
+            in_degree[node.id]++;
+        }
+    }
+
+    std::deque<NodeId> ready;
+    for (const ExecutableNode& node : plan.nodes) {
+        if (in_degree[node.id] == 0) {
+            ready.push_back(node.id);
+        }
+    }
+
+    std::vector<NodeId> order;
+    order.reserve(plan.nodes.size());
+    while (!ready.empty()) {
+        const NodeId current = ready.front();
+        ready.pop_front();
+        order.push_back(current);
+        for (const NodeId successor : successors[current]) {
+            if (in_degree[successor] == 0) {
+                continue;
+            }
+            if (--in_degree[successor] == 0) {
+                ready.push_back(successor);
+            }
+        }
+    }
+
+    if (order.size() != plan.nodes.size()) {
+        return error("topological sort failed: cycle detected", -20);
+    }
+    return order;
+}
+
+void apply_tensor_spec(const TensorDefinition& tensor,
+                       const AllocationDefinition& allocation,
+                       Buffer& buffer) {
+    BufferSpec& spec = buffer.spec();
+    spec.descriptor.dtype = tensor.dtype;
+    spec.descriptor.shape = tensor.shape;
+    spec.descriptor.memory_space = allocation.memory_space;
+    spec.descriptor.byte_offset = allocation.byte_offset;
+    spec.alignment = allocation.alignment;
+}
+
+Result<void> ensure_capacity(Buffer& buffer, uint64_t required_bytes, TensorId tid) {
+    if (buffer.spec().byte_size == 0) {
+        buffer.spec().byte_size = required_bytes;
+        return Result<void>{};
+    }
+    if (buffer.spec().byte_size < required_bytes) {
+        return error("tensor " + std::to_string(tid) + " buffer is " +
+                         std::to_string(buffer.spec().byte_size) +
+                         " bytes, plan requires " + std::to_string(required_bytes),
+                     -27);
+    }
+    return Result<void>{};
 }
 
 }  // namespace
@@ -67,291 +127,250 @@ Error cycle_error() {
 Result<std::vector<Event>> Scheduler::execute(ExecutionPlan& plan,
                                               std::vector<Buffer>& inputs,
                                               std::vector<Buffer>& outputs) {
-    auto planning_result = MemoryPlanner::plan(plan);
-    if (!planning_result.ok()) {
-        return Error{"memory planning failed: " + planning_result.error().message,
-                     -10};
+    if (plan.version == 0 || plan.version > ExecutionPlan::kCurrentVersion) {
+        return error("unsupported plan version " + std::to_string(plan.version), -42);
+    }
+    if (plan.inputs.size() != inputs.size()) {
+        return error("plan.inputs has " + std::to_string(plan.inputs.size()) +
+                         " entries but caller passed " + std::to_string(inputs.size()),
+                     -11);
+    }
+    if (plan.outputs.size() != outputs.size()) {
+        return error("plan.outputs has " + std::to_string(plan.outputs.size()) +
+                         " entries but caller passed " + std::to_string(outputs.size()),
+                     -13);
     }
 
-    std::unordered_map<TensorId, const TensorDefinition*> tensor_definitions;
-    tensor_definitions.reserve(plan.tensors.size() * 2 + 1);
+    // Dense slot per declared tensor. The table is sized by tensor count,
+    // not by the largest id, so sparse or hostile ids cannot force a huge
+    // allocation.
+    std::unordered_map<TensorId, std::size_t> tensor_slot;
+    tensor_slot.reserve(plan.tensors.size() * 2 + 1);
+    for (std::size_t index = 0; index < plan.tensors.size(); ++index) {
+        if (!tensor_slot.emplace(plan.tensors[index].id, index).second) {
+            return error("duplicate tensor id " + std::to_string(plan.tensors[index].id),
+                         -28);
+        }
+    }
+
+    std::unordered_map<NodeId, std::size_t> node_index;
+    node_index.reserve(plan.nodes.size() * 2 + 1);
+    for (std::size_t index = 0; index < plan.nodes.size(); ++index) {
+        if (!node_index.emplace(plan.nodes[index].id, index).second) {
+            return error("duplicate node id " + std::to_string(plan.nodes[index].id), -28);
+        }
+        if (plan.artifacts.empty() ||
+            plan.nodes[index].artifact >= plan.artifacts.size()) {
+            return error("node " + std::to_string(plan.nodes[index].id) +
+                             " references missing artifact " +
+                             std::to_string(plan.nodes[index].artifact),
+                         -18);
+        }
+    }
+
+    const auto order_result = topological_order(plan, node_index);
+    if (!order_result.ok()) {
+        return order_result.error();
+    }
+    const std::vector<NodeId>& order = order_result.value();
+
+    const auto planning_result = MemoryPlanner::plan(plan, order);
+    if (!planning_result.ok()) {
+        return error("memory planning failed: " + planning_result.error().message, -10);
+    }
+
+    std::unordered_map<TensorId, const TensorDefinition*> tensors;
+    tensors.reserve(plan.tensors.size() * 2 + 1);
     for (const TensorDefinition& tensor : plan.tensors) {
-        tensor_definitions.emplace(tensor.id, &tensor);
+        tensors.emplace(tensor.id, &tensor);
     }
-    std::unordered_map<TensorId, const AllocationDefinition*> allocation_definitions;
-    allocation_definitions.reserve(plan.allocations.size() * 2 + 1);
+    std::unordered_map<TensorId, const AllocationDefinition*> allocations;
+    allocations.reserve(plan.allocations.size() * 2 + 1);
     for (const AllocationDefinition& allocation : plan.allocations) {
-        allocation_definitions.emplace(allocation.tensor_id, &allocation);
+        allocations.emplace(allocation.tensor_id, &allocation);
     }
-    auto apply_planned_spec = [&](TensorId tid, Buffer& buffer) -> Result<void> {
-        const auto tensor_it = tensor_definitions.find(tid);
-        if (tensor_it == tensor_definitions.end()) {
-            return Error{"tensor " + std::to_string(tid) +
-                             " is missing from plan.tensors",
-                         -16};
+
+    std::unordered_set<TensorId> external;
+    external.reserve(plan.inputs.size() + plan.outputs.size());
+    for (const PlanInput& input : plan.inputs) {
+        external.insert(input.tensor_id);
+    }
+    for (const PlanOutput& output : plan.outputs) {
+        external.insert(output.tensor_id);
+    }
+
+    std::vector<Buffer> table(plan.tensors.size());
+    for (std::size_t index = 0; index < plan.inputs.size(); ++index) {
+        const TensorId tid = plan.inputs[index].tensor_id;
+        const auto slot_it = tensor_slot.find(tid);
+        if (slot_it == tensor_slot.end()) {
+            return error("plan.inputs[" + std::to_string(index) +
+                             "] references unknown tensor " + std::to_string(tid),
+                         -12);
         }
-        const auto allocation_it = allocation_definitions.find(tid);
-        if (allocation_it == allocation_definitions.end()) {
-            return Error{"tensor " + std::to_string(tid) +
+        table[slot_it->second] =
+            Buffer(inputs[index].data(), inputs[index].spec(), false);
+    }
+    for (std::size_t index = 0; index < plan.outputs.size(); ++index) {
+        const TensorId tid = plan.outputs[index].tensor_id;
+        const auto slot_it = tensor_slot.find(tid);
+        if (slot_it == tensor_slot.end()) {
+            return error("plan.outputs[" + std::to_string(index) +
+                             "] references unknown tensor " + std::to_string(tid),
+                         -14);
+        }
+        table[slot_it->second] =
+            Buffer(outputs[index].data(), outputs[index].spec(), false);
+    }
+
+    // Allocate every intermediate through the provider that owns its
+    // memory space. External tensors keep the caller's storage.
+    for (const TensorDefinition& tensor : plan.tensors) {
+        if (external.contains(tensor.id)) {
+            continue;
+        }
+        const auto allocation_it = allocations.find(tensor.id);
+        if (allocation_it == allocations.end()) {
+            return error("tensor " + std::to_string(tensor.id) +
                              " is missing from plan.allocations",
-                         -17};
+                         -17);
         }
-        const TensorDefinition& tensor = *tensor_it->second;
         const AllocationDefinition& allocation = *allocation_it->second;
-        BufferSpec& spec = buffer.spec();
+        std::shared_ptr<DeviceProvider> provider;
+        for (const std::shared_ptr<DeviceProvider>& candidate : providers_) {
+            if (candidate->memory_space() == allocation.memory_space) {
+                provider = candidate;
+                break;
+            }
+        }
+        if (!provider) {
+            return error("no provider for memory space " +
+                             std::to_string(static_cast<int>(allocation.memory_space)),
+                         -26);
+        }
+        BufferSpec spec;
         spec.descriptor.dtype = tensor.dtype;
         spec.descriptor.shape = tensor.shape;
         spec.descriptor.memory_space = allocation.memory_space;
         spec.descriptor.byte_offset = allocation.byte_offset;
         spec.byte_size = allocation.byte_size;
         spec.alignment = allocation.alignment;
-        return Result<void>{};
-    };
-
-    // 1. Dense tables, indexed by TensorId / NodeId. We size them
-    //    once and rely on bound checks at every access.
-    std::vector<Buffer> buffer_table(table_size(plan));
-    std::vector<Event>  event_table(table_size(plan));
-
-    // 2. Move caller's PlanInput buffers into the table. After this,
-    //    the caller's `inputs` vector holds default Buffers — same
-    //    contract every move-only API in this codebase obeys.
-    if (plan.inputs.size() != inputs.size()) {
-        return Error{"plan.inputs has " + std::to_string(plan.inputs.size()) +
-                         " entries but caller passed " + std::to_string(inputs.size()),
-                     -11};
-    }
-    for (std::size_t i = 0; i < plan.inputs.size(); ++i) {
-        const TensorId tid = plan.inputs[i].tensor_id;
-        if (tid >= buffer_table.size()) {
-            return Error{"plan.inputs[" + std::to_string(i) +
-                             "] tensor_id out of range",
-                         -12};
+        auto allocated = provider->allocate(spec);
+        if (!allocated.ok()) {
+            return error("allocation failed for tensor " +
+                             std::to_string(tensor.id) + ": " +
+                             allocated.error().message,
+                         -26);
         }
-        buffer_table[tid] = std::move(inputs[i]);
+        table[tensor_slot[tensor.id]] = std::move(allocated.value());
     }
 
-    // 3. Move caller's PlanOutput buffers into the table. They sit
-    //    here for the duration of the run and we move them back at
-    //    the end — symmetric with the input install.
-    if (plan.outputs.size() != outputs.size()) {
-        return Error{"plan.outputs has " + std::to_string(plan.outputs.size()) +
-                         " entries but caller passed " +
-                         std::to_string(outputs.size()),
-                     -13};
-    }
-    for (std::size_t i = 0; i < plan.outputs.size(); ++i) {
-        const TensorId tid = plan.outputs[i].tensor_id;
-        if (tid >= buffer_table.size()) {
-            return Error{"plan.outputs[" + std::to_string(i) +
-                             "] tensor_id out of range",
-                         -14};
-        }
-        buffer_table[tid] = std::move(outputs[i]);
-    }
-
-    // 4. Inputs are trivially ready (no producer runs before them).
-    //    Default-constructed Events are already marked "completed"
-    //    (see Event ABI), but we set them explicitly here so the
-    //    intent is visible in code review.
-    for (const auto& pi : plan.inputs) {
-        if (pi.tensor_id < event_table.size()) {
-            event_table[pi.tensor_id].mark_completed();
+    std::vector<Event> event_table(plan.tensors.size());
+    for (const PlanInput& input : plan.inputs) {
+        const auto slot_it = tensor_slot.find(input.tensor_id);
+        if (slot_it != tensor_slot.end()) {
+            event_table[slot_it->second].mark_completed();
         }
     }
 
-    // 5. Build the reverse-edge map (depender → dependees) and the
-    //    NodeId → plan.nodes index. Kahn's algorithm walks the
-    //    reverse edges; the index lets us translate NodeId to the
-    //    concrete ExecutableNode struct in O(1).
-    std::vector<std::vector<NodeId>> successors(table_size(plan));
-    std::vector<std::size_t> in_degree(table_size(plan), 0);
-    std::unordered_map<NodeId, std::size_t> node_index;
-    node_index.reserve(plan.nodes.size() * 2 + 1);
-    for (std::size_t i = 0; i < plan.nodes.size(); ++i) {
-        const NodeId nid = plan.nodes[i].id;
-        node_index[nid] = i;
-        for (NodeId dep : plan.nodes[i].dependencies) {
-            if (dep >= successors.size()) {
-                return Error{"node " + std::to_string(nid) +
-                                 " depends on out-of-range node " +
-                                 std::to_string(dep),
-                             -15};
-            }
-            successors[dep].push_back(nid);
-            in_degree[nid]++;
-        }
-    }
-
-    // 6. Kahn's algorithm. We seed the ready queue with every
-    //    in-degree-0 node (in plan.nodes order for determinism).
-    std::deque<NodeId> ready;
-    for (std::size_t i = 0; i < plan.nodes.size(); ++i) {
-        const NodeId nid = plan.nodes[i].id;
-        if (in_degree[nid] == 0) {
-            ready.push_back(nid);
-        }
-    }
-
-    std::vector<NodeId> topo;
-    topo.reserve(plan.nodes.size());
-    while (!ready.empty()) {
-        const NodeId nid = ready.front();
-        ready.pop_front();
-        topo.push_back(nid);
-        for (NodeId succ : successors[nid]) {
-            if (in_degree[succ] == 0) {
-                // Already processed — duplicates in the successor
-                // list are harmless but worth a guard.
-                continue;
-            }
-            if (--in_degree[succ] == 0) {
-                ready.push_back(succ);
-            }
-        }
-    }
-
-    if (topo.size() != plan.nodes.size()) {
-        return cycle_error();
-    }
-
-    // 7. Walk topo order, dispatching each node.
-    //
-    //    The provider's launch() takes std::span<const Buffer>/Buffer
-    //    which require a contiguous range. The buffer table is
-    //    dense but indexed by TensorId, so we move the relevant
-    //    rows into a temporary vector, span over it, launch, then
-    //    move them back. For the shipped handle-only Buffer the
-    //    moves are no-ops.
-    for (NodeId nid : topo) {
-        auto idx_it = node_index.find(nid);
-        if (idx_it == node_index.end()) {
-            return Error{"topological order references unknown node " +
-                             std::to_string(nid),
-                         -21};
-        }
-        const ExecutableNode& node = plan.nodes[idx_it->second];
-
+    for (const NodeId node_id : order) {
+        const ExecutableNode& node = plan.nodes[node_index[node_id]];
         if (node.device >= providers_.size()) {
-            return Error{"node " + std::to_string(node.id) +
-                             " references device " +
-                             std::to_string(node.device) +
-                             " but only " + std::to_string(providers_.size()) +
-                             " providers are registered",
-                         -22};
+            return error("node " + std::to_string(node.id) + " references device " +
+                             std::to_string(node.device) + " but only " +
+                             std::to_string(providers_.size()) + " providers are registered",
+                         -22);
         }
         const std::shared_ptr<DeviceProvider>& provider = providers_[node.device];
 
-        // Stage A — move inputs out of the table into a contiguous vec.
-        std::vector<Buffer>   in_bufs;
-        std::vector<Event>    in_events;
-        std::vector<TensorId> in_ids;  // remember where to put them back
-        in_bufs.reserve(node.inputs.size());
+        ArtifactDescriptor artifact = plan.artifacts[node.artifact];
+        artifact.launch = node.launch;
+        if (artifact.target != provider->target()) {
+            return error("node " + std::to_string(node.id) + " artifact target " +
+                             std::to_string(static_cast<int>(artifact.target)) +
+                             " does not match provider target " +
+                             std::to_string(static_cast<int>(provider->target())),
+                         -22);
+        }
+
+        std::vector<Buffer> in_buffers;
+        std::vector<Event> in_events;
+        in_buffers.reserve(node.inputs.size());
         in_events.reserve(node.inputs.size());
-        in_ids.reserve(node.inputs.size());
-        for (TensorId tid : node.inputs) {
-            if (tid >= buffer_table.size()) {
-                return Error{"node " + std::to_string(node.id) +
-                                 " has out-of-range input tensor " +
-                                 std::to_string(tid),
-                             -23};
+        for (const TensorId tid : node.inputs) {
+            const auto slot_it = tensor_slot.find(tid);
+            if (slot_it == tensor_slot.end()) {
+                return error("node " + std::to_string(node.id) +
+                                 " references unknown input tensor " + std::to_string(tid),
+                             -23);
             }
-            auto spec_result = apply_planned_spec(tid, buffer_table[tid]);
-            if (!spec_result.ok()) {
-                return spec_result.error();
+            const auto tensor_it = tensors.find(tid);
+            const auto allocation_it = allocations.find(tid);
+            if (tensor_it == tensors.end() || allocation_it == allocations.end()) {
+                return error("tensor " + std::to_string(tid) +
+                                 " is missing from the plan tables",
+                             -17);
             }
-            in_ids.push_back(tid);
-            in_bufs.push_back(std::move(buffer_table[tid]));
-            if (tid < event_table.size()) {
-                in_events.push_back(event_table[tid]);
+            Buffer& buffer = table[slot_it->second];
+            apply_tensor_spec(*tensor_it->second, *allocation_it->second, buffer);
+            const auto capacity = ensure_capacity(
+                buffer, allocation_it->second->byte_size, tid);
+            if (!capacity.ok()) {
+                return capacity.error();
             }
+            in_buffers.emplace_back(buffer.data(), buffer.spec(), false);
+            in_events.push_back(event_table[slot_it->second]);
         }
 
-        // Stage B — move outputs out. The provider fills them in
-        // place; we put them back after launch so downstream nodes
-        // observe the mutation.
-        std::vector<Buffer>   out_bufs;
-        std::vector<TensorId> out_ids;
-        out_bufs.reserve(node.outputs.size());
-        out_ids.reserve(node.outputs.size());
-        for (TensorId tid : node.outputs) {
-            if (tid >= buffer_table.size()) {
-                return Error{"node " + std::to_string(node.id) +
-                                 " has out-of-range output tensor " +
-                                 std::to_string(tid),
-                             -24};
+        std::vector<Buffer> out_buffers;
+        std::vector<std::size_t> out_slots;
+        out_buffers.reserve(node.outputs.size());
+        out_slots.reserve(node.outputs.size());
+        for (const TensorId tid : node.outputs) {
+            const auto slot_it = tensor_slot.find(tid);
+            if (slot_it == tensor_slot.end()) {
+                return error("node " + std::to_string(node.id) +
+                                 " references unknown output tensor " + std::to_string(tid),
+                             -24);
             }
-            auto spec_result = apply_planned_spec(tid, buffer_table[tid]);
-            if (!spec_result.ok()) {
-                return spec_result.error();
+            const auto tensor_it = tensors.find(tid);
+            const auto allocation_it = allocations.find(tid);
+            if (tensor_it == tensors.end() || allocation_it == allocations.end()) {
+                return error("tensor " + std::to_string(tid) +
+                                 " is missing from the plan tables",
+                             -17);
             }
-            out_ids.push_back(tid);
-            out_bufs.push_back(std::move(buffer_table[tid]));
+            Buffer& buffer = table[slot_it->second];
+            apply_tensor_spec(*tensor_it->second, *allocation_it->second, buffer);
+            const auto capacity = ensure_capacity(
+                buffer, allocation_it->second->byte_size, tid);
+            if (!capacity.ok()) {
+                return capacity.error();
+            }
+            out_buffers.emplace_back(buffer.data(), buffer.spec(), false);
+            out_slots.push_back(slot_it->second);
         }
 
-        // The launch entry point is the string "node <id>" so the
-        // MockProvider can log it verbatim and the TritonProvider can
-        // map it to the cached compilation. TargetKind comes from the
-        // provider so the dispatch table doesn't need a redundant
-        // plan field.
-        ArtifactDescriptor stub;
-        stub.target = provider->target();
-        stub.entry_point = "node " + std::to_string(node.id);
-
-        const std::span<const Buffer> in_span{in_bufs};
-        const std::span<Buffer>       out_span{out_bufs};
-        const std::span<const Event>  dep_span{in_events};
-
-        auto launch_res = provider->launch(stub, in_span, out_span, dep_span);
-        if (!launch_res.ok()) {
-            return Error{"launch failed for node " + std::to_string(node.id) +
-                             ": " + launch_res.error().message,
-                         -30};
+        auto launched = provider->launch(artifact, in_buffers, out_buffers, in_events);
+        if (!launched.ok()) {
+            return error("launch failed for node " + std::to_string(node.id) + ": " +
+                             launched.error().message,
+                         -30);
         }
-        Event produced = std::move(launch_res.value());
-
-        // All outputs become ready when the kernel completes. The
-        // shipped scope emits one Event for the whole launch and
-        // publishes it to every output tensor; a per-output fence
-        // granularity is not exercised today.
-        for (TensorId tid : out_ids) {
-            event_table[tid] = produced;
-        }
-
-        // Stage C — put buffers back into the live table. Inputs
-        // come back unchanged; outputs come back mutated.
-        for (std::size_t i = 0; i < in_ids.size(); ++i) {
-            buffer_table[in_ids[i]] = std::move(in_bufs[i]);
-        }
-        for (std::size_t i = 0; i < out_ids.size(); ++i) {
-            buffer_table[out_ids[i]] = std::move(out_bufs[i]);
+        for (const std::size_t slot : out_slots) {
+            event_table[slot] = launched.value();
         }
     }
 
-    // 8. Build the event list to return — one Event per PlanOutput,
-    //    in plan.outputs order. We do NOT block on them here;
-    //    callers can wait themselves (or chain into downstream
-    //    ForgeRT runs). For Phase 1's host stub the events are
-    //    already complete so wait() returns instantly.
     std::vector<Event> output_events;
     output_events.reserve(plan.outputs.size());
-    for (const auto& po : plan.outputs) {
-        if (po.tensor_id >= event_table.size()) continue;
-        output_events.push_back(event_table[po.tensor_id]);
-    }
-
-    // 9. Move plan-output buffers back to the caller. Inputs and
-    //    intermediates live and die inside the table — they get
-    //    cleaned up when `buffer_table` goes out of scope.
-    for (std::size_t i = 0; i < plan.outputs.size(); ++i) {
-        const TensorId tid = plan.outputs[i].tensor_id;
-        if (i >= outputs.size()) break;
-        if (tid < buffer_table.size()) {
-            outputs[i] = std::move(buffer_table[tid]);
+    for (const PlanOutput& output : plan.outputs) {
+        const auto slot_it = tensor_slot.find(output.tensor_id);
+        if (slot_it != tensor_slot.end()) {
+            output_events.push_back(event_table[slot_it->second]);
         }
     }
-
-    return Result<std::vector<Event>>{std::move(output_events)};
+    return output_events;
 }
 
 }  // namespace forge_rt

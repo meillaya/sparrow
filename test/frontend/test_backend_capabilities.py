@@ -7,13 +7,14 @@ silently picks a wrong backend.
 
 Coverage (Task 4 acceptance = 4 tests; we ship exactly those 4):
 
-  * Triton supports every shipped forge.tensor op (8 total: gemm,
-    fused_epilogue, broadcast_add, gelu, layer_norm, softmax, sdpa,
-    reshape) but no async execution. fp32 only.
-  * Astra does NOT support softmax / sdpa (Phase 4 microcode ISA lacks
-    them).
-  * MicroGPU does NOT support reshape (the SIMT ISA has no reshape
-    microcode op).
+  * Triton supports seven of the forge.tensor ops (gemm,
+    fused_epilogue, broadcast_add, gelu, layer_norm, softmax, sdpa) but
+    no async execution. fp32 only. ``reshape`` has no dialect op and is
+    not listed.
+  * Astra does NOT support layer_norm / softmax / sdpa (the microcode
+    ISA lacks them).
+  * MicroGPU does NOT support gemm, fused_epilogue, sdpa, or reshape
+    (the SIMT ISA has no matmul or reshape microcode).
   * The ``BACKEND_CAPABILITIES`` registry exposes the static instances
     under their canonical names (``"triton"``, ``"astra"``,
     ``"microgpu"``) by identity.
@@ -29,14 +30,12 @@ from forge_torch.capabilities import (
 )
 
 
-def test_triton_supports_all_tensor_ops_except_async() -> None:
-    """Triton-CPU supports every Phase 7 forge.tensor op (8 total).
+def test_triton_supports_the_lowerable_tensor_ops() -> None:
+    """Triton-CPU lists the seven ops that have a dialect definition.
 
-    The partitioner relies on ``TRITON_CAPABILITIES`` being the superset
-    so it can always fall back to Triton when no other backend is
-    available for an op. ``supports_async_execution=False`` reflects the
-    synchronous shipped kernel (``fused_gemm_bias_gelu.cpp`` runs
-    in-process and returns once the loop is done).
+    A capability is not a lowering guarantee; the partitioner also
+    consults ``COMPILER_LOWERINGS``. ``supports_async_execution=False``
+    reflects the synchronous shipped kernel.
     """
     expected_ops = {
         "forge.tensor.gemm",
@@ -46,7 +45,6 @@ def test_triton_supports_all_tensor_ops_except_async() -> None:
         "forge.tensor.layer_norm",
         "forge.tensor.softmax",
         "forge.tensor.scaled_dot_product_attention",
-        "forge.tensor.reshape",
     }
     assert TRITON_CAPABILITIES.supported_ops == expected_ops
     assert TRITON_CAPABILITIES.supported_ops >= expected_ops  # exact-equality sanity
@@ -54,28 +52,25 @@ def test_triton_supports_all_tensor_ops_except_async() -> None:
     assert TRITON_CAPABILITIES.supported_types == frozenset({"fp32"})
 
 
-def test_astra_does_not_support_softmax_or_sdpa() -> None:
-    """Astra's microcode ISA has no softmax / sdpa op (Phase 4 limitation).
-
-    The partitioner must reject Astra for any region that contains
-    either of these two ops; the compile() entry point uses the same
-    negative assertion to emit the UserWarning at the user-visible API
-    (Task 5).
-    """
-    assert "forge.tensor.softmax" not in ASTRA_CAPABILITIES.supported_ops
-    assert "forge.tensor.scaled_dot_product_attention" not in ASTRA_CAPABILITIES.supported_ops
+def test_astra_does_not_support_reduction_or_attention_ops() -> None:
+    """Astra's microcode ISA has no layer_norm, softmax, or sdpa."""
+    for op in (
+        "forge.tensor.layer_norm",
+        "forge.tensor.softmax",
+        "forge.tensor.scaled_dot_product_attention",
+    ):
+        assert op not in ASTRA_CAPABILITIES.supported_ops, op
 
 
-def test_microgpu_does_not_support_reshape() -> None:
-    """MicroGPU's SIMT ISA has no reshape microcode.
-
-    The Phase 8 interpreter only implements load / store / add / mul /
-    sigmoid / return; reshape must be lowered by the Triton path before
-    MicroGPU can run the kernel. The partitioner routes any region
-    containing ``forge.tensor.reshape`` to Triton-CPU via this negative
-    predicate.
-    """
-    assert "forge.tensor.reshape" not in MICROGPU_CAPABILITIES.supported_ops
+def test_microgpu_does_not_support_matmul_or_attention() -> None:
+    """The SIMT ISA has no matmul, fused epilogue, sdpa, or reshape op."""
+    for op in (
+        "forge.tensor.gemm",
+        "forge.tensor.fused_epilogue",
+        "forge.tensor.scaled_dot_product_attention",
+        "forge.tensor.reshape",
+    ):
+        assert op not in MICROGPU_CAPABILITIES.supported_ops, op
 
 
 def test_registry_lookup_by_name() -> None:
@@ -91,3 +86,15 @@ def test_registry_lookup_by_name() -> None:
     assert BACKEND_CAPABILITIES["astra"] is ASTRA_CAPABILITIES
     assert BACKEND_CAPABILITIES["microgpu"] is MICROGPU_CAPABILITIES
     assert set(BACKEND_CAPABILITIES) == {"triton", "astra", "microgpu"}
+
+
+def test_compiler_lowerings_are_explicit() -> None:
+    """The compiler lowering map exists and starts empty.
+
+    Empty means the partitioner fails closed until a region codegen
+    lands. It must not silently fall back to Triton.
+    """
+    from forge_torch.lowerings import COMPILER_LOWERINGS
+
+    assert set(COMPILER_LOWERINGS) == {"triton", "astra", "microgpu"}
+    assert all(ops == frozenset() for ops in COMPILER_LOWERINGS.values())

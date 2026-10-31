@@ -1,18 +1,18 @@
 #pragma once
 
 // ForgeRT C++ ABI — MemoryPlanner (spec §10, Phase 3).
-// Top-of-the-line orchestration for the buffer-reuse pipeline. Runs
-// LivenessAnalyzer over the plan, stamps each LiveRange with its
-// byte_size (from plan.tensors), and feeds the result into
-// BufferReuseAllocator::allocate. The returned allocations are then
-// written into `plan.allocations` so downstream phases (the eventual
-// scheduler hook in Task 33-38, the observability memory report in
-// Task 44-48) can read them back.
+// Orchestrates the buffer-reuse pipeline. Runs LivenessAnalyzer in
+// schedule order, stamps each LiveRange with its byte_size, and feeds
+// the internal ranges into BufferReuseAllocator::allocate. External
+// inputs and outputs are not placed in the reuse pool: the caller owns
+// those buffers, so an output must never share an offset with an input
+// whose lifetime has ended.
 //
-// Phase 3 always writes MemorySpace::Host into the AllocationDefinition;
-// heterogeneous partitioning (Phase 7) is what promotes tensors to
-// Device0/Device1 before this stage runs.
+// The returned allocations are written into `plan.allocations`, one row
+// per tensor in plan.tensors order. MemorySpace comes from the tensor
+// definition, not a hardcoded Host.
 #include <cstdint>
+#include <span>
 
 #include "forge_rt/execution_plan.hpp"
 #include "forge_rt/result.hpp"
@@ -21,17 +21,24 @@ namespace forge_rt {
 
 class MemoryPlanner {
 public:
-    // Run the planner. On success, mutates `plan.allocations` to
-    // contain one AllocationDefinition per tensor with a valid
-    // (byte_offset, byte_size, alignment, memory_space) tuple. On
-    // failure (e.g. pool too small for the working set), returns an
-    // Error and leaves plan.allocations untouched.
+    // Run the planner with an explicit schedule order. On success,
+    // mutates `plan.allocations` to contain one AllocationDefinition
+    // per tensor. External inputs and outputs get offset 0 and their
+    // real size; internal tensors get reused offsets. On failure,
+    // returns an Error and leaves plan.allocations untouched.
     //
-    // Defaults: total_bytes = 512 MiB, alignment = 64. These match the
-    // Phase 3 reference Triton-CPU kernel's pool sizing.
+    // Defaults: total_bytes = 512 MiB, alignment = 64.
+    static Result<void> plan(ExecutionPlan& plan,
+                             std::span<const NodeId> order,
+                             uint64_t total_bytes = 512ULL * 1024 * 1024,
+                             uint64_t alignment = 64);
+
+    // Convenience overload. Treats plan.nodes order as the schedule
+    // order. The scheduler uses the span overload with its topological
+    // order; this overload exists for tests and simple callers.
     static Result<void> plan(ExecutionPlan& plan,
                              uint64_t total_bytes = 512ULL * 1024 * 1024,
-                             uint64_t alignment   = 64);
+                             uint64_t alignment = 64);
 };
 
 }  // namespace forge_rt

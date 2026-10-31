@@ -16,7 +16,7 @@ func.func @unsupported_op(
     %x: !forge.tensor<2x512x11008xf32>,
     %b: !forge.tensor<11008xf32>
 ) -> !forge.tensor<2x512x11008xf32> {
-    // CHECK-ERR: TensorToAstra: no astra equivalent for forge.tensor.broadcast_add
+    // CHECK-ERR: TensorToAstra is unavailable
     %z = forge.tensor.broadcast_add %x, %b
         : (!forge.tensor<2x512x11008xf32>, !forge.tensor<11008xf32>) -> !forge.tensor<2x512x11008xf32>
     return %z : !forge.tensor<2x512x11008xf32>

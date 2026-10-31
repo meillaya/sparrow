@@ -30,7 +30,6 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import Final, Literal
 
 import torch
@@ -135,18 +134,22 @@ class CompiledModel:
     the per-region compiled callables produced by
     :func:`forge_torch.backend.compile` with ``target=``.
 
-    :meth:`__call__` runs each region's compiled callable in order,
-    threading tensors between them via ``torch.fx.Interpreter``. The
-    per-region callables are stored for introspection (region→backend
-    mapping, downstream tooling) but the live execution path goes
-    through FX; this matches the Phase 1 ``CompiledFusedMLP.__call__``
-    semantics where ``compile(target=...)`` is a stub that delegates to
-    eager. Phase 7 keeps the same single-source-of-truth pattern.
+    :meth:`__call__` runs the captured FX graph through
+    ``torch.fx.Interpreter``. The per-region assignments and callables
+    are stored for inspection; they are planning labels, not lowered
+    artifacts. The object reports ``execution="fx-interpreter"`` and
+    ``planning_only=True`` so callers do not mistake it for a compiled
+    model.
     """
 
     #: Marker for downstream tooling (compiled region table, validation
     #: harness) — mirrors ``CompiledFusedMLP.compiled``.
     compiled: bool = True
+    #: This object is a planning result; it runs the FX graph, not
+    #: per-region kernels.
+    execution: str = "fx-interpreter"
+    lowered: bool = False
+    planning_only: bool = True
 
     def __init__(
         self,
@@ -248,17 +251,14 @@ def compile_partitioned(
     # Interpreter which is target-agnostic.
     #
     # ``backend.compile`` emits a ``UserWarning`` per op the full model
-    # contains that the chosen target cannot run. After partitioning,
-    # each region only uses the subset of ops the target supports — but
-    # we still pass the full model to ``backend.compile``, so the
-    # warning fires anyway. Silence it here so the heterogeneous compile
-    # path stays quiet; per-region submodules are Phase 7b work.
+    # contains that the chosen target cannot run. The per-region callables
+    # are the whole model today, so the warnings are accurate: the
+    # assignment is a planning label, not a lowered artifact. Do not
+    # suppress them.
     region_compiled = []
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        for backend in assignments:
-            compiled = backend_compile(model, example_inputs, target=backend)
-            region_compiled.append(compiled)
+    for backend in assignments:
+        compiled = backend_compile(model, example_inputs, target=backend)
+        region_compiled.append(compiled)
 
     return CompiledModel(
         model=model,

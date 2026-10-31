@@ -1,86 +1,142 @@
-# ForgeStack
+# Sparrow
 
-MLIR-based heterogeneous ML compiler and C++ runtime for PyTorch — PyTorch FX → xDSL MLIR → backend providers → C++ execution.
+Sparrow is a PyTorch-to-MLIR compiler and C++ runtime for three CPU backends.
+It is a research-scale stack for compiler and runtime engineers who need to
+read every layer.
 
-![CI](https://img.shields.io/badge/ci-bash%20scripts%2Fci.sh-green)
-![License](https://img.shields.io/badge/license-Apache%202.0-blue)
-
-Three backends live today: **Triton-CPU** (Phase 1), **Astra-sim** (Phase 4 microcode dialect + cycle-accurate simulator), and **MicroGPU-sim** (Phase 8 SIMT interpreter). Phase 7 adds a heterogeneous partitioner that dispatches regions across them per spec §19.
-
-## Status
-
-| Phase | What                                                        | State |
-| ----- | ----------------------------------------------------------- | :---: |
-| 1     | Vertical slice — PyTorch FX → xDSL → Triton-CPU, matches eager |   ✓   |
-| 2     | xDSL optimize, dynamic-shape guards, epilogue fusion         |   ✓   |
-| 3     | ForgeRT memory planner (liveness + buffer reuse)             |   ✓   |
-| 4     | `astra` dialect + microcode ISA + simulators + provider     |   ✓   |
-| 7     | Heterogeneous partitioner + spec §19 transformer demo       |   ✓   |
-| 8     | `microgpu` dialect + SIMT bytecode interpreter + provider   |   ✓   |
-| 5/6   | Triton perf (path B / quantized GEMM) + HLS → FPGA          |  deferred |
-
-`bash scripts/ci.sh` is the gate — lit + pytest (~298 tests) + ctest + ruff + ty.
+Version 0.2.0 is a baseline. The frontend imports and caches graphs and returns
+an eager callable by default. A native fused-MLP path runs through ForgeRT when
+the pybind11 module is built. General graphs do not get a runtime plan yet.
+[docs/SPEC.md](docs/SPEC.md) states each contract and marks each one met,
+partial, or gap; [docs/AUDIT.md](docs/AUDIT.md) records the evidence and the
+remediation order.
 
 ## Quick start
 
 ```bash
-# Enter the Nix-managed dev shell (cmake, ninja, python312, torch, xdsl, ruff, ty)
-devenv shell bash -c '
-  # Activate the uv-managed venv for runtime deps (torch, xdsl, etc.)
-  source .venv/bin/activate
-
-  # Verify the toolchain
-  bash scripts/probe-env.sh
-
-  # Hello FusedMLP
-  python3 -c "
-  import torch
-  from forge_torch.backend import compile
-  from forge_torch.conftest import FusedMLP
-  m = FusedMLP()
-  x, w, b = torch.randn(2, 512, 4096), torch.randn(4096, 11008), torch.randn(11008)
-  c = compile(m, [x, w, b])
-  out = c(x, w, b)
-  assert torch.allclose(out, m(x, w, b), atol=1e-4)
-  print(\"hello forgestack:\", tuple(out.shape))
-  "
-
-  # Run the full gate (lit + pytest + ctest + ruff + ty)
-  bash scripts/ci.sh
-'
+devenv shell
+python3 -c "import torch, xdsl; print(torch.__version__, xdsl.__version__)"
 ```
 
-The `bash scripts/setup-env.sh` path is the fallback for hosts where `devenv shell`
-isn't available (e.g. CI runners without Nix). For local dev, `devenv shell` is
-the canonical entry — it provides cmake / ninja / system test headers that
-the venv alone doesn't have.
+On a host without `devenv`, use the venv path:
+
+```bash
+bash scripts/setup-env.sh
+source .venv/bin/activate
+python3 -c "import torch, xdsl; print(torch.__version__, xdsl.__version__)"
+```
+
+Run the frontend on the fused MLP fixture:
+
+```bash
+python3 - <<'PY'
+import torch
+from forge_torch.backend import compile
+
+
+class FusedMLP(torch.nn.Module):
+    def forward(self, x, weight, bias):
+        return torch.nn.functional.gelu(x @ weight + bias)
+
+
+model = FusedMLP()
+x = torch.randn(2, 8, 128)
+w = torch.randn(128, 256)
+b = torch.randn(256)
+
+compiled = compile(model, [x, w, b])
+out = compiled(x, w, b)
+print("shape", tuple(out.shape), "lowered", compiled.lowered)
+PY
+```
+
+```text
+shape (2, 8, 256) lowered False
+```
+
+`lowered` is `False` in a plain dev shell. The callable then executes the eager
+model, and the import, cache, and report steps still run. Build the optional
+native module (`cmake -B build -S . -G Ninja && cmake --build build`, then set
+`PYTHONPATH=build/python`) to run this fused MLP through the C++ kernel and get
+`lowered True`. The kernel is a naive triple loop, so large shapes fall back to
+eager.
+
+## Backends
+
+| Backend | Implemented | Limit |
+| --- | --- | --- |
+| Triton-CPU | fp32 fused GEMM, bias, and GELU C++ kernel, provider | 2D input, one output |
+| Astra-sim | 64-bit microcode ISA, assembler, functional and timing simulators, provider | 16x16 tile; codegen is not usable |
+| MicroGPU-sim | 16-bit SIMT ISA, assembler, interpreter, provider | No lowering pass; one input |
+
+The registry is narrowed to ops with a dialect definition. The compiler
+lowering map is empty, so `partition()` raises instead of assigning a region it
+cannot lower. The native bridge covers the fused MLP on Triton-CPU; general
+graphs run eager.
+
+## Architecture
+
+Sparrow separates the compile path from the runtime path.
+
+![Compilation path](docs/figures/compilation.png)
+
+The frontend captures an FX graph, imports it as MLIR, and partitions FX
+regions with a capability and cost model. The compiler lowers and optimizes the
+MLIR. Backend artifacts and the cache sit at the end of that path.
+
+![Runtime path](docs/figures/runtime.png)
+
+ForgeRT takes an execution plan, computes liveness and buffer reuse, orders the
+nodes, and dispatches each launch to a provider. The providers are Host-only
+and synchronous.
+
+The frontend builds a one-node execution plan for the fused MLP slice. General
+graphs do not get one, so the two figures describe one design whose halves meet
+only for that slice. The specification marks the rest as gaps.
 
 ## Repository layout
 
-```
-forgestack/
-├── compiler/                # xDSL dialects, conversion passes, forge-opt driver
-├── frontend/                # torch.compile hook + FX → MLIR importer
-├── runtime/                 # ForgeRT C++ ABI + scheduler + memory planner
-├── backends/
-│   ├── triton/cpu/          # Phase 1 — fused_gemm_bias_gelu CPU kernel
-│   ├── astra/               # Phase 4 — microcode dialect + cycle-accurate sim
-│   └── microgpu/            # Phase 8 — SIMT bytecode interpreter
-├── models/                  # transformer_block.py (spec §19)
-├── test/                    # pytest (frontend + backends + e2e)
-├── scripts/                 # setup-env.sh, probe-env.sh, ci.sh
-├── README.md
-├── LICENSE                  # Apache-2.0
+```text
+sparrow/
+├── compiler/     xDSL dialects, conversions, transforms, forge-opt
+├── frontend/     forge_torch capture, import, cache, partition, report
+├── backends/     Triton-CPU, Astra-sim, MicroGPU-sim
+├── runtime/      ForgeRT ABI, planner, scheduler, providers
+├── models/       transformer block fixture
+├── test/         pytest suites
+├── scripts/      environment probe, setup, CI
+├── docs/         specification, audit, figures
+├── LICENSE
 └── pyproject.toml
 ```
 
-## References
+The repository and documents use Sparrow. The Python package `forge_torch`, C++
+namespace `forge_rt`, and the compatibility CMake aliases keep historical
+names. Renaming import paths is a separate, breaking change.
 
-- Spec sections (in `.omo/plans/forgestack-cpu.md`): [§3 FX importer](.omo/plans/forgestack-cpu.md) · [§6 partitioner capabilities](.omo/plans/forgestack-cpu.md) · [§19 transformer demo](.omo/plans/forgestack-cpu.md)
-- Architecture plans: [`.omo/plans/forgestack.md`](.omo/plans/forgestack.md) (Phase 1) · [`.omo/plans/forgestack-cpu.md`](.omo/plans/forgestack-cpu.md) (Phases 2–8 + 7)
-- Adding a backend: [`backend/CONTRIBUTING.md`](backend/CONTRIBUTING.md)
-- Upstream dependencies: [xDSL](https://xdsl.dev/) · [torch.compile](https://pytorch.org/docs/stable/torch.compiler.html)
+## Documentation
+
+- [docs/SPEC.md](docs/SPEC.md): system contracts, requirement status, and the
+  deviation register.
+- [docs/AUDIT.md](docs/AUDIT.md): findings with file and line evidence, plus a
+  remediation order.
+- [docs/figures/](docs/figures/): Excalidraw scenes, rendered PNGs, and the
+  generator that reproduces both.
+- [backend/CONTRIBUTING.md](backend/CONTRIBUTING.md): adding a backend,
+  provider, and lowering.
+
+## Checks
+
+```bash
+bash scripts/probe-env.sh
+bash scripts/ci.sh
+```
+
+The probe names every missing tool. The gate chains the C++ build and ctest,
+lit, pytest, ruff, and ty. It expects the environment from
+`scripts/setup-env.sh` and is not hermetic yet. Read
+[docs/AUDIT.md](docs/AUDIT.md) before relying on it.
 
 ## License
 
-Apache-2.0.
+Apache-2.0. See [LICENSE](LICENSE).

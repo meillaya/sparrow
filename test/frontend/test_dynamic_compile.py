@@ -1,4 +1,4 @@
-"""ForgeStack dynamic_compile pytest tests (Task 17, spec §3 + §13).
+"""Sparrow dynamic_compile pytest tests (Task 17, spec §3 + §13).
 
 Three tests pin the dynamic-shape compilation pipeline:
 
@@ -22,9 +22,10 @@ import json
 from pathlib import Path
 
 import torch
+from torch.fx.experimental.proxy_tensor import make_fx
+
 from forge_torch.conftest import FusedMLP
 from forge_torch.dynamic_compile import dynamic_compile
-from torch.fx.experimental.proxy_tensor import make_fx
 
 
 def _inputs() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -130,3 +131,33 @@ def test_dynamic_compile_different_constraints_separate_buckets(tmp_path: Path) 
     assert compiled2.cache_key is not None
     assert compiled1.cache_key.symbolic_constraints != compiled2.cache_key.symbolic_constraints
     assert compiled1.cache_key.hexdigest() != compiled2.cache_key.hexdigest()
+
+
+def test_dynamic_compile_static_models_do_not_collide(tmp_path: Path) -> None:
+    """Two static models get separate buckets even with no constraints.
+
+    The old bucket hashed only the constraint tuple, so every static model
+    (the empty tuple) shared one directory and the second model could read
+    the first model's MLIR.
+    """
+    import torch.nn as nn
+
+    class MatmulOnly(nn.Module):
+        def forward(self, x, weight):
+            return x @ weight
+
+    cache_root = tmp_path / "cache"
+    x, w, b = _inputs()
+
+    gm1 = make_fx(MatmulOnly(), tracing_mode="fake")(x, w)
+    first = dynamic_compile(gm1, [x, w], cache_root=cache_root)
+
+    gm2 = make_fx(FusedMLP(), tracing_mode="fake")(x, w, b)
+    second = dynamic_compile(gm2, [x, w, b], cache_root=cache_root)
+
+    assert first.cache_key is not None and second.cache_key is not None
+    assert first.cache_key.hexdigest() != second.cache_key.hexdigest()
+    assert first.cache_hit is False
+    assert second.cache_hit is False
+    assert "gelu" in second.mlir_text
+    assert "gelu" not in first.mlir_text

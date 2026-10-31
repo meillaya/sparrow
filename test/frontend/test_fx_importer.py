@@ -1,4 +1,4 @@
-"""ForgeStack FX importer pytest tests (Task 8)."""
+"""Sparrow FX importer pytest tests (Task 8)."""
 
 from __future__ import annotations
 
@@ -6,14 +6,15 @@ import io
 
 import pytest
 import torch
-from forge_torch import op_mapping as om
-from forge_torch.conftest import FusedMLP
-from forge_torch.fx_importer import FxImporter
 from torch.fx.experimental.proxy_tensor import make_fx
 from xdsl.context import Context
 from xdsl.dialects.builtin import ModuleOp
 from xdsl.parser import Parser
 from xdsl.printer import Printer
+
+from forge_torch import op_mapping as om
+from forge_torch.conftest import FusedMLP
+from forge_torch.fx_importer import FxImporter
 
 
 def _module_roundtrip(mlir_text: str) -> str:
@@ -110,7 +111,7 @@ def test_compile_callable_returns_eager_result(fused_mlp_inputs):
     through CompiledFusedMLP.__call__ which runs the captured model."""
     from forge_torch.backend import BACKEND, compile
 
-    assert BACKEND == "forgestack"
+    assert BACKEND == "sparrow"
     x, w, b = fused_mlp_inputs
 
     compiled = compile(FusedMLP(), [x, w, b])

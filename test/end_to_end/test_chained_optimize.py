@@ -8,7 +8,7 @@ bias-bearing fused_epilogue``; per the Wave-1 deviation note in
 :mod:`compiler.lib.Transforms.Fuse`, fusion reduces 3 → 2 not 3 → 1).
 
 The driver is invoked via :mod:`subprocess` against
-``/home/mei/projects/forgestack/compiler/tools/forge-opt/forge_opt.py``
+the repository `compiler/tools/forge-opt/forge_opt.py`
 so the test exercises the same entry point end-users will hit from the
 CLI. The textual output is regex-scanned for the ``func.func`` body and
 ``forge.tensor.\\w+`` occurrences; the count is bounded by the
@@ -29,11 +29,16 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import torch
+
 from forge_torch.backend import compile
 from forge_torch.conftest import FusedMLP
+
+REPO = Path(__file__).resolve().parents[2]
 
 SHAPES = [
     # (B, S, K, N) — Phase 1 canonical (spec §19)
@@ -48,14 +53,14 @@ SHAPES = [
 def _run_chained_optimize(mlir_text: str) -> str:
     """Invoke ``forge-opt --action=optimize`` on ``mlir_text`` and return stdout.
 
-    Mirrors the exact command from the Task-12 deliverable: hard-coded
-    paths to ``/home/mei/projects/forgestack/.venv/bin/python3`` and
-    the ``forge_opt.py`` driver, stdin input, captured stdout.
+    Mirrors the exact command from the Task-12 deliverable: the current
+    interpreter, the repository ``forge_opt.py`` driver, stdin input, and
+    captured stdout.
     """
     proc = subprocess.run(
         [
-            "/home/mei/projects/forgestack/.venv/bin/python3",
-            "/home/mei/projects/forgestack/compiler/tools/forge-opt/forge_opt.py",
+            sys.executable,
+            str(REPO / "compiler" / "tools" / "forge-opt" / "forge_opt.py"),
             "-",
             "--action=optimize",
         ],

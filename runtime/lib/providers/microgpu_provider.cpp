@@ -12,6 +12,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <csignal>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -228,7 +230,7 @@ std::string find_project_root(const std::string& venv_path) {
         return std::string(cwd.data());
     }
 
-    return "/home/mei/projects/forgestack";
+    return {};
 }
 
 }  // namespace
@@ -302,6 +304,18 @@ Result<Event> MicroGpuProvider::launch(const ArtifactDescriptor& artifact,
     }
     if (outputs[0].data() == nullptr) {
         return Error{"MicroGpuProvider::launch: null output buffer", 2222};
+    }
+    if (kByteSize(outputs[0].spec().descriptor.dtype) != sizeof(std::int32_t)) {
+        return Error{"MicroGpuProvider::launch: output dtype must be a 4-byte "
+                     "integer or float, got " +
+                         std::string(to_string(outputs[0].spec().descriptor.dtype)),
+                     2227};
+    }
+    if (outputs[0].spec().byte_size % sizeof(std::int32_t) != 0) {
+        return Error{"MicroGpuProvider::launch: output byte_size must be a "
+                     "multiple of 4, got " +
+                         std::to_string(outputs[0].spec().byte_size),
+                     2227};
     }
 
     // Build the bytecode word list. The artifact.binary carries the

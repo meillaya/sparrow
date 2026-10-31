@@ -1,4 +1,4 @@
-"""ForgeStack compiler version (per spec §13 cache key).
+"""Sparrow compiler version (per spec §13 cache key).
 
 The hex digest of every :class:`forge_torch.cache.CacheKey` folds in
 this string so that a compiler upgrade invalidates the on-disk cache
@@ -9,4 +9,4 @@ the codegen templates.
 
 from __future__ import annotations
 
-__version__ = "0.1.0-phase1"
+__version__ = "0.2.0"

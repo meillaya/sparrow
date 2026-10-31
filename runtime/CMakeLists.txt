@@ -4,7 +4,7 @@
 # Triton provider, ExecutionPlan, and scheduler on top of this surface.
 # Task 12 adds ExecutionPlan + JSON (de)serialization + the topological
 # scheduler on top of the ABI surfaces.
-add_library(forgestack_runtime STATIC
+add_library(sparrow_runtime STATIC
     lib/abi_types.cpp
     lib/tensor_descriptor.cpp
     lib/artifact_descriptor.cpp
@@ -22,7 +22,7 @@ add_library(forgestack_runtime STATIC
     lib/scheduler.cpp
 )
 
-target_include_directories(forgestack_runtime PUBLIC
+target_include_directories(sparrow_runtime PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     # TritonProvider::launch calls into backends/triton/cpu/. The kernel
     # header is a self-contained .hpp pair with no external deps, so the
@@ -31,11 +31,13 @@ target_include_directories(forgestack_runtime PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../backends/triton/cpu>
 )
 
-target_compile_features(forgestack_runtime PUBLIC cxx_std_20)
+target_compile_features(sparrow_runtime PUBLIC cxx_std_20)
+target_compile_options(sparrow_runtime PRIVATE -Werror)
 
-target_link_libraries(forgestack_runtime PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(sparrow_runtime PUBLIC nlohmann_json::nlohmann_json sparrow_triton_cpu)
 
-add_library(forgestack::runtime ALIAS forgestack_runtime)
+add_library(sparrow::runtime ALIAS sparrow_runtime)
+add_library(forgestack::runtime ALIAS sparrow_runtime)
 
 enable_testing()
 add_subdirectory(tests)

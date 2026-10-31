@@ -1,11 +1,11 @@
-"""ForgeStack Triton kernel template tests (Phase 1: shape + parse + warmup).
+"""Sparrow Triton kernel template tests (Phase 1: shape + parse + warmup).
 
 These tests validate the *kernel artifact surface* (source, AST shape,
 constexpr signature, codegen stub) without requiring a CUDA device. The
 numerical-correctness test on the last case *does* need CUDA; on a CPU-only
 host it is skipped with a clear message rather than being silently dropped.
 
-Spec reference: .omo/plans/forgestack.md §7 Path A.
+Reference: phase 1 plan §7 Path A.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ import inspect
 
 import pytest
 import torch
+
+pytest.importorskip("triton", reason="Triton backend tests require the optional triton package")
 
 from backends.triton.codegen.triton_codegen import emit_triton
 from backends.triton.jit import JITLauncher, launch_fused_gemm_bias_gelu
@@ -145,7 +147,7 @@ def test_codegen_returns_canonical_source() -> None:
 def test_fused_gemm_bias_gelu_shape_cpu_reference() -> None:
     """If CUDA is available: launch and compare against `torch.nn.functional.gelu`.
 
-    On a CPU-only host (the common dev environment for ForgeStack Phase 1)
+    On a CPU-only host (the common dev environment for Sparrow Phase 1)
     the Triton driver is unavailable — `kernel.warmup` and `triton.compile`
     both raise `RuntimeError: 0 active drivers`. The kernel source itself is
     still validated above via AST + `JITFunction.src`; this test only adds

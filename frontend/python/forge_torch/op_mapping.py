@@ -3,7 +3,7 @@
 The :func:`map_node_to_forge` helper centralises the (FX node target string) →
 (``forge.graph.<op>`` name + shape inference callable) translation.
 ``fx_importer.FxImporter`` (which walks a captured ``torch.fx.GraphModule``)
-consults this table; nothing else in ForgeTorch should re-derive the mapping.
+consults this table; nothing else in Sparrow frontend should re-derive the mapping.
 
 Supported ops (shipped scope)
 -----------------------------
@@ -137,7 +137,7 @@ def map_node_to_forge(target: object) -> str:
         return SUPPORTED_ATEN_OPS[normalized]
     if normalized in UNSUPPORTED_BUT_RECOGNISED:
         msg = (
-            f"{normalized!s} is recognised by the ForgeTorch frontend but "
+            f"{normalized!s} is recognised by the Sparrow frontend but "
             f"is not yet lowered by the shipped FX importer."
         )
         raise NotImplementedError(msg)

@@ -51,7 +51,7 @@
   ];
 
   enterShell = ''
-    echo "ForgeStack Phase 1 dev environment activated"
+    echo "Sparrow Phase 1 dev environment activated"
     echo "  python: $(python3 --version 2>&1)"
     echo "  uv:     $(uv --version 2>&1)"
     echo "  ruff:   $(ruff --version 2>&1)"

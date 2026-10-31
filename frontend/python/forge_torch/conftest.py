@@ -1,4 +1,4 @@
-"""Pytest fixtures for ForgeStack frontend tests (Task 8)."""
+"""Pytest fixtures for Sparrow frontend tests (Task 8)."""
 
 from __future__ import annotations
 

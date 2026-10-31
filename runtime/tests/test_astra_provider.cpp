@@ -140,7 +140,7 @@ TEST(AstraProvider_LaunchFusedMLP, M16K8N16BiasZero) {
 
     ArtifactDescriptor ad;
     ad.target = TargetKind::Astra;
-    ad.entry_point = "fused_gemm_bias_gelu";
+    ad.entry_point = "astra.reference.tile16";
     // 8-byte opaque marker keeps the artifact non-empty; the provider
     // does not yet read microcode bytes back from the artifact (it
     // builds the program on the Python side).

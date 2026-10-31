@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using forge_rt::AllocationDefinition;
@@ -123,8 +124,18 @@ TEST(MemoryPlanner_end_to_end, DiamondPlanGetsNonOverlappingAllocations) {
         EXPECT_EQ(a.byte_size, expected_bytes);
     }
 
+    // External inputs and outputs are caller-owned and excluded from the
+    // reuse pool. Their rows carry offset 0; internal tensors are the only
+    // rows whose offsets can alias.
+    const std::unordered_set<TensorId> external = {0, 4};
+    for (const auto& a : p.allocations) {
+        if (external.contains(a.tensor_id)) {
+            EXPECT_EQ(a.byte_offset, 0u);
+        }
+    }
+
     // Re-derive live ranges and assert no two overlapping-lifetime
-    // tensors share any byte in their [offset, offset+byte_size) range.
+    // internal tensors share any byte in their [offset, offset+byte_size) range.
     const std::vector<LiveRange> ranges = LivenessAnalyzer::analyze(p);
     std::unordered_map<TensorId, LiveRange> range_of;
     for (const auto& r : ranges) range_of.emplace(r.id, r);
@@ -138,6 +149,10 @@ TEST(MemoryPlanner_end_to_end, DiamondPlanGetsNonOverlappingAllocations) {
             const auto rj_it = range_of.find(p.tensors[j].id);
             ASSERT_NE(ri_it, range_of.end());
             ASSERT_NE(rj_it, range_of.end());
+            if (external.contains(p.tensors[i].id) ||
+                external.contains(p.tensors[j].id)) {
+                continue;
+            }
             const LiveRange& ri = ri_it->second;
             const LiveRange& rj = rj_it->second;
             const bool life_overlap = (ri.first_use <= rj.last_use)
@@ -161,8 +176,22 @@ TEST(MemoryPlanner_end_to_end, DiamondPlanGetsNonOverlappingAllocations) {
     // High-water mark fits inside the pool.
     uint64_t hwm = 0;
     for (const auto& a : p.allocations) {
+        if (external.contains(a.tensor_id)) {
+            continue;
+        }
         hwm = std::max(hwm, a.byte_offset + a.byte_size);
     }
     EXPECT_LE(hwm, kTotal);
 }
 
+
+TEST(MemoryPlanner_alignment, ZeroAlignmentIsRejected) {
+    ExecutionPlan plan;
+    plan.name = "zero_alignment";
+    plan.tensors = {MakeTensor(0, "x", {4})};
+
+    Result<void> result = MemoryPlanner::plan(plan, 1024, 0);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.error().code, -41);
+    EXPECT_TRUE(plan.allocations.empty());
+}

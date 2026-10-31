@@ -1,4 +1,4 @@
-"""ForgeStack compilation cache pytest tests (Task 14, spec §13).
+"""Sparrow compilation cache pytest tests (Task 14, spec §13).
 
 Six tests pin the contract of :mod:`forge_torch.cache` and
 :mod:`forge_torch.cache_store`:
@@ -12,7 +12,7 @@ Six tests pin the contract of :mod:`forge_torch.cache` and
    the in-process state.
 
 Each test uses a per-test temporary directory under
-``/tmp/forgestack-cache-tests`` so they don't share state across runs
+``/tmp/sparrow-cache-tests`` so they don't share state across runs
 and don't dirty the repo's own ``.cache/``.
 """
 
@@ -23,12 +23,16 @@ import tempfile
 from pathlib import Path
 
 from forge_torch.cache import make_cache_key
-from forge_torch.cache_store import CacheStore
+from forge_torch.cache_store import CACHE_KEY_FIELD, CacheStore
+
+
+def _without_key(artifact: dict) -> dict:
+    return {name: value for name, value in artifact.items() if name != CACHE_KEY_FIELD}
 
 
 def _tmp_root() -> Path:
     """Per-call cache root; cleaned up automatically by ``tempfile``."""
-    return Path(tempfile.mkdtemp(prefix="forgestack-cache-tests-"))
+    return Path(tempfile.mkdtemp(prefix="sparrow-cache-tests-"))
 
 
 def test_cache_key_hexdigest_is_deterministic() -> None:
@@ -82,9 +86,10 @@ def test_cache_store_put_then_get() -> None:
 
     loaded = store.get(key)
     assert loaded is not None
-    assert loaded == artifact
+    assert _without_key(loaded) == artifact
+    assert loaded[CACHE_KEY_FIELD] == key.hexdigest()
 
-    # The on-disk artifact.json must exist at the canonical layout.
+    # The on-disk artifact.json sits under the key digest.
     expected_path = (
         root
         / "fused_mlp"
@@ -92,11 +97,13 @@ def test_cache_store_put_then_get() -> None:
         / "fp32"
         / "static"
         / "schedule_64x128x32"
+        / key.hexdigest()
         / "artifact.json"
     )
     assert expected_path.exists()
     on_disk = json.loads(expected_path.read_text())
-    assert on_disk == artifact
+    assert _without_key(on_disk) == artifact
+    assert on_disk[CACHE_KEY_FIELD] == key.hexdigest()
 
 
 def test_cache_store_memory_evicts_lru() -> None:
@@ -129,7 +136,8 @@ def test_cache_store_disk_persists_across_instances() -> None:
     # Brand-new instance, same root — should warm its memory tier from disk.
     reader = CacheStore(root)
     fresh = reader.get(key)
-    assert fresh == payload
+    assert fresh is not None
+    assert _without_key(fresh) == payload
     # The reader's memory tier now contains the entry.
     assert key.hexdigest() in reader._memory
 

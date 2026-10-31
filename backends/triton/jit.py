@@ -7,7 +7,7 @@ forwards to `triton.compile`. Per spec §7 the kernel artifact surface
 shape guards + workspace) is owned by this module; the shipped kernel
 emits the canonical template via the codegen stub.
 
-Spec reference: .omo/plans/forgestack.md §7, §20.
+Reference: phase 1 plan §7 and §20.
 """
 
 from __future__ import annotations

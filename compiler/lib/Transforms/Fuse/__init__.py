@@ -69,6 +69,16 @@ class FuseAddActivationPattern(RewritePattern):
             return
         add = op.x.owner
 
+        # The rewrite erases ``add``, so its result must have exactly one
+        # use (``op.x``, guaranteed by the match above). With any additional
+        # consumer, erasing the add would leave a live SSA value dangling —
+        # leave the graph untouched instead. ``IRUses`` is a plain iterable
+        # without ``__len__`` (xDSL 0.74), so materialize the users first
+        # (same idiom as the ``gemm`` single-use check below).
+        add_users = [use.operation for use in add.out.uses]
+        if len(add_users) != 1 or add_users[0] is not op:
+            return
+
         if not isinstance(add.x.owner, GemmOp):
             return
         gemm = add.x.owner

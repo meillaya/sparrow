@@ -37,13 +37,7 @@ namespace forge_rt {
 
 namespace {
 
-inline uint64_t align_up(uint64_t offset, uint64_t alignment) {
-    if (alignment <= 1) return offset;
-    const uint64_t rem = offset % alignment;
-    return rem == 0 ? offset : offset + (alignment - rem);
-}
-
-// True iff two inclusive NodeId intervals overlap.
+// True iff two inclusive schedule-position intervals overlap.
 inline bool intervals_overlap(uint32_t a_first, uint32_t a_last,
                               uint32_t b_first, uint32_t b_last) {
     return a_first <= b_last && b_first <= a_last;
@@ -92,6 +86,7 @@ std::vector<Allocation> BufferReuseAllocator::allocate(
     uint64_t alignment) {
     std::vector<Allocation> out;
     if (ranges.empty()) return out;
+    if (alignment == 0) return out;
 
     struct Placed {
         TensorId id;
@@ -119,7 +114,7 @@ std::vector<Allocation> BufferReuseAllocator::allocate(
     for (const LiveRange& r : sorted) {
         if (r.byte_size == 0) {
             // Zero-byte ranges — pin at offset 0 with no consumption.
-            out.push_back(Allocation{r.id, 0, 0, alignment, MemorySpace::Host});
+            out.push_back(Allocation{r.id, 0, 0, alignment, r.space});
             placed.push_back(Placed{r.id, 0, 0, r.first_use, r.last_use});
             continue;
         }
@@ -147,7 +142,7 @@ std::vector<Allocation> BufferReuseAllocator::allocate(
             }
             if (!conflict) {
                 out.push_back(Allocation{r.id, offset, r.byte_size,
-                                         alignment, MemorySpace::Host});
+                                         alignment, r.space});
                 placed.push_back(Placed{r.id, offset, r.byte_size,
                                         r.first_use, r.last_use});
                 placed_ok = true;

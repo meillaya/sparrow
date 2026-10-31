@@ -1,4 +1,4 @@
-"""ForgeStack FX-importer symbolic-dim pytest tests (Task 15).
+"""Sparrow FX-importer symbolic-dim pytest tests (Task 15).
 
 Three tests pin the symbolic-dim path added by Task 15:
 
@@ -22,9 +22,10 @@ Three tests pin the symbolic-dim path added by Task 15:
 from __future__ import annotations
 
 import torch
+from torch.fx.experimental.proxy_tensor import make_fx
+
 from forge_torch.conftest import FusedMLP
 from forge_torch.fx_importer import FxImporter
-from torch.fx.experimental.proxy_tensor import make_fx
 
 
 def _imported_mlir(module: torch.fx.GraphModule, inputs, *, heuristic: bool = False) -> str:

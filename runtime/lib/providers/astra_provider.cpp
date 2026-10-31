@@ -11,6 +11,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <csignal>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -126,6 +128,8 @@ SubprocessResult run_subprocess(const std::vector<std::string>& argv,
     }
 
     // Parent: feed stdin_data to the child, drain stdout, wait.
+    // A child that exits early must not kill the host with SIGPIPE.
+    ::signal(SIGPIPE, SIG_IGN);
     ::close(in_pipe[0]);
     ::close(out_pipe[1]);
 
@@ -304,7 +308,7 @@ std::string find_project_root(const std::string& venv_path) {
 
     // 3. Last-resort known location (covers developer hosts without
     // a populated cwd).
-    return "/home/mei/projects/forgestack";
+    return {};
 }
 
 }  // namespace
@@ -370,6 +374,12 @@ Result<Event> AstraProvider::launch(const ArtifactDescriptor& artifact,
             "(got " +
                 std::string(to_string(artifact.target)) + ")",
             2120};
+    }
+    if (artifact.entry_point != "astra.reference.tile16") {
+        return Error{
+            "AstraProvider::launch: artifact-driven execution is not implemented; "
+            "use entry_point 'astra.reference.tile16'",
+            2133};
     }
     if (inputs.size() < 3) {
         return Error{"AstraProvider::launch: need 3 inputs (x, w, b); got " +
@@ -489,6 +499,13 @@ Result<Event> AstraProvider::launch(const ArtifactDescriptor& artifact,
                 std::to_string(raw.size()) + " != expected " +
                 std::to_string(expected),
             2131};
+    }
+    if (outputs[0].spec().byte_size < expected) {
+        return Error{
+            "AstraProvider::launch: output buffer is " +
+                std::to_string(outputs[0].spec().byte_size) +
+                " bytes, payload needs " + std::to_string(expected),
+            2132};
     }
     std::memcpy(outputs[0].data(), raw.data(), expected);
 

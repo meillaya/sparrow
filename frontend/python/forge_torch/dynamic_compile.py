@@ -40,12 +40,13 @@ import torch
 from torch.fx import GraphModule
 
 from forge_torch.cache import CacheKey, make_cache_key
+from forge_torch.cache_store import _write_json_atomic
 from forge_torch.fx_importer import FxImporter
 
-_logger = logging.getLogger("forgestack.dynamic_compile")
+_logger = logging.getLogger("sparrow.dynamic_compile")
 
 
-DEFAULT_CACHE_ROOT = Path(".cache/forgestack")
+DEFAULT_CACHE_ROOT = Path(".cache/sparrow")
 DYNAMIC_BUCKET_PREFIX = "dynamic_"
 
 
@@ -191,20 +192,43 @@ def dynamic_compile(
     # Step 2 — derive the constraint signature from FX metadata.
     constraint_signature = _discover_constraint_signature(gm)
 
-    # Step 3 — bucket on the constraint signature's SHA-256 prefix.
-    cache_seed = "\n".join(constraint_signature).encode("utf-8")
-    bucket_hex = hashlib.sha256(cache_seed).hexdigest()[:16]
+    # Step 3 — bucket on the graph identity, target, arch, dtype, and
+    # constraints. Hashing only the constraints made every static model
+    # share one bucket, so the second model could read the first model's
+    # MLIR.
+    graph_hash = hashlib.sha256(mlir_text.encode("utf-8")).hexdigest()
+    bucket_seed = json.dumps(
+        {
+            "graph_hash": graph_hash,
+            "target": target,
+            "arch": arch,
+            "dtype": "fp32",
+            "symbolic_constraints": list(constraint_signature),
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    bucket_hex = hashlib.sha256(bucket_seed).hexdigest()[:16]
     bucket_dir = _discover_artifact_path(root, bucket_hex)
     artifact_path = bucket_dir / "artifact.json"
 
-    cache_hit = artifact_path.is_file()
-    if cache_hit:
-        artifact = json.loads(artifact_path.read_text())
+    cached: dict | None = None
+    try:
+        cached = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError):
+        cached = None
+    cache_hit = isinstance(cached, dict) and cached.get("bucket") == bucket_hex
+    if cache_hit and cached is not None:
+        artifact = cached
         optimized_mlir = artifact.get("mlir_text", mlir_text)
     else:
         optimized_mlir = _run_forge_opt(mlir_text)
         artifact = {
             "model_name": model.__class__.__name__,
+            "graph_hash": graph_hash,
+            "bucket": bucket_hex,
+            "target": target,
+            "arch": arch,
+            "dtype": "fp32",
             "mlir_text": optimized_mlir,
             "symbolic_constraints": list(constraint_signature),
             "schedule": {
@@ -215,8 +239,7 @@ def dynamic_compile(
                 "stages": 4,
             },
         }
-        bucket_dir.mkdir(parents=True, exist_ok=True)
-        artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True))
+        _write_json_atomic(artifact_path, artifact)
 
     cache_key = make_cache_key(
         graph_hash=hashlib.sha256(optimized_mlir.encode("utf-8")).hexdigest(),

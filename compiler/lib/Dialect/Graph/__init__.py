@@ -1,7 +1,7 @@
 """forge.graph dialect — direct PyTorch FX capture in MLIR form.
 
 This is the Phase-1 graph-level representation of captured PyTorch graphs
-(see forgestack plan §4). It preserves the FX semantics — broadcasting, dtype
+(see the Sparrow design notes §4). It preserves the FX semantics — broadcasting, dtype
 promotion, dynamic shapes, view semantics, tensor aliasing, device placement —
 and is the input surface for the later GraphToTensor conversion pass.
 
@@ -154,13 +154,19 @@ class TensorType(ParametrizedAttribute, TypeAttribute):
         !forge.tensor<dimxdimxdimx...xdtype, [constraint, ...]>
 
     where each ``dim`` is either an ``IntAttr`` (static, >=0) or a
-    ``StringAttr`` (symbolic name like ``B``, ``S``, ``K``), the trailing
-    ``dtype`` is one of the :class:`ForgeDType` spellings (``f32``, ``f16``,
-    ``bf16``, ``i32``, ``i8``, ``i4``), and the optional trailing
-    ``[constraint, ...]`` is a list of :class:`SymbolicConstraint` attrs
-    (one per symbolic dim, in dim-order). An empty list omits the
-    ``, [...]`` token entirely — concrete-shape IR keeps the original
-    Phase-1 surface.
+    ``StringAttr`` (symbolic name like ``B``, ``S``, ``K``; names must not
+    contain the letter ``x``, see below), the trailing ``dtype`` is one of
+    the :class:`ForgeDType` spellings (``f32``, ``f16``, ``bf16``, ``i32``,
+    ``i8``, ``i4``), and the optional trailing ``[constraint, ...]`` is a
+    list of :class:`SymbolicConstraint` attrs (one per symbolic dim, in
+    dim-order). An empty list omits the ``, [...]`` token entirely —
+    concrete-shape IR keeps the original Phase-1 surface.
+
+    Symbolic dimension names must not contain the letter ``x``: the lexer
+    glues a symbolic name to the following ``x`` shape separator (so
+    ``Bx4xf32`` arrives as a single ``BARE_IDENT``), and the parser splits
+    that token on its first ``x``. Use names like ``B``, ``S``, or ``K``
+    (or the anonymous ``?`` marker) instead.
     """
 
     name = "forge.tensor"
@@ -337,12 +343,27 @@ def _parse_dim_token(parser: AttrParser) -> Attribute:
     Returns ``IntAttr`` for INTEGER_LIT, ``StringAttr("?")`` for the
     anonymous-symbolic ``?`` punctuation, and ``StringAttr(name)`` for
     BARE_IDENT (named symbolic dim like ``B``, ``S``, ``K``).
+
+    The MLIR lexer glues a symbolic dim name to the following ``x`` shape
+    separator and the rest of the shape, so ``Bx4xf32`` arrives as a single
+    ``BARE_IDENT``. We split such a token on its first ``x``, return the
+    prefix as the dim name, and resume the lexer at the separator so the
+    caller's :func:`_consume_shape_x` consumes it normally. Consequently a
+    symbolic dimension name must not contain the letter ``x``.
     """
+    # Snapshot the token before consuming anything: ``_resume_from`` below
+    # needs its source span, and the helper calls may advance the parser.
+    token = parser._current_token
     int_val = parser.parse_optional_integer(allow_boolean=False, allow_negative=False)
     if int_val is not None:
         return IntAttr(int_val)
     if parser.parse_optional_punctuation("?") is not None:
         return StringAttr("?")
+    if token.kind.name == "BARE_IDENT" and "x" in token.text:
+        prefix = token.text.partition("x")[0]
+        parser._consume_token()
+        parser._resume_from(token.span.start + len(prefix))
+        return StringAttr(prefix)
     ident = parser.parse_optional_identifier()
     if ident is None:
         parser.raise_error("expected forge.tensor dim (integer, '?', or identifier)")
@@ -387,8 +408,10 @@ def _broadcast_shapes(
     """Return the broadcast shape or ``None`` if shapes are incompatible.
 
     NumPy rules: dims are right-aligned; a dim of size 1 broadcasts to match;
-    two symbolic dims must agree (or one is the other); a static and a
-    symbolic dim with the same value pair agree. Static mismatches (e.g. 3 vs
+    two symbolic dims must agree (or one is the other). A symbolic dim
+    against a static dim agrees only when the static dim is 1 — any other
+    symbol/static pair is treated as a mismatch (conservative: no assumption
+    is made that the symbol equals the literal). Static mismatches (e.g. 3 vs
     5) are incompatible.
     """
     # Pad the shorter shape with size-1 dims on the LEFT.
@@ -405,7 +428,12 @@ def _broadcast_shapes(
 
 
 def _broadcast_dim(a: Attribute, b: Attribute) -> Attribute | None:
-    """Broadcast two single dims; ``None`` on mismatch."""
+    """Broadcast two single dims; ``None`` on mismatch.
+
+    A symbol only agrees with the identical symbol; facing a static dim it
+    agrees only when that static dim is 1. All other symbol/static pairs are
+    deliberately rejected rather than assumed equal.
+    """
     a_int = a.data if isinstance(a, IntAttr) else None
     b_int = b.data if isinstance(b, IntAttr) else None
     a_sym = a.data if isinstance(a, StringAttr) else None
@@ -491,6 +519,11 @@ class MatmulOp(IRDLOperation):
             raise VerifyException(
                 f"matmul operand dtypes must agree ({x_t.get_dtype()} vs {w_t.get_dtype()})"
             )
+        if self.out.type.get_dtype() != x_t.get_dtype():
+            raise VerifyException(
+                f"matmul result dtype {self.out.type.get_dtype()} "
+                f"does not match operand dtype {x_t.get_dtype()}"
+            )
 
 
 def _infer_matmul_result(x: TensorType, w: TensorType) -> tuple[Attribute, ...] | None:
@@ -569,6 +602,11 @@ class AddOp(IRDLOperation):
             )
         if not isinstance(self.out.type, TensorType):
             raise VerifyException(f"add result must be !forge.tensor, got {self.out.type}")
+        if self.out.type.get_dtype() != a_t.get_dtype():
+            raise VerifyException(
+                f"add result dtype {self.out.type.get_dtype()} "
+                f"does not match operand dtype {a_t.get_dtype()}"
+            )
         broadcast = _broadcast_shapes(a_t.get_shape(), b_t.get_shape())
         if broadcast is None:
             raise VerifyException(

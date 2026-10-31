@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# scripts/setup-env.sh — bootstrap the ForgeStack Phase 1 dev environment.
+# scripts/setup-env.sh — bootstrap the Sparrow Phase 1 dev environment.
 #
-# Two-tier strategy (matches ForgeStack env constraints 2026-07-18):
+# Two-tier strategy (matches Sparrow env constraints 2026-07-18):
 #   1. Try `devenv shell` (canonical; works on hosts with trusted-user Nix config)
 #   2. Fall back to a uv-managed venv at .venv (works everywhere; what CI / containers use)
 #
@@ -13,7 +13,6 @@
 # Toolchain (2026-07-18): Python deps are installed via `uv pip install`,
 # lint/format via `ruff`, type-checking via `ty`. Both ruff and ty are
 # installed globally with `uv tool install` so the binaries are on PATH
-# (`~/.local/bin`); see .omo/notepads/forgestack/learnings.md §(d).
 #
 # Usage:
 #   bash scripts/setup-env.sh        # bootstrap

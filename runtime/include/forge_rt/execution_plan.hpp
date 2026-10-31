@@ -17,6 +17,8 @@
 #include <nlohmann/json_fwd.hpp>
 
 #include "abi_types.hpp"
+#include "artifact_descriptor.hpp"
+#include "result.hpp"
 
 namespace forge_rt {
 
@@ -54,15 +56,6 @@ struct AllocationDefinition {
     MemorySpace memory_space = MemorySpace::Host;
 };
 
-// Kernel launch geometry. Defaults are sensible (single-element
-// grid/block, no shared memory) so test fixtures don't have to spell
-// them out every time.
-struct LaunchParameters {
-    std::vector<int64_t> grid;
-    std::vector<int64_t> block;
-    uint64_t shared_memory_bytes = 0;
-};
-
 // One launch site: device, artifact, I/O lists, dependency edges, and
 // launch geometry. `dependencies` is the set of NodeIds that must
 // complete before this node fires — the scheduler materialises the
@@ -91,13 +84,15 @@ struct PlanOutput {
     std::string external_name;
 };
 
-// Top-level plan: a name plus the four collections above. The JSON
-// representation of this struct is the on-disk format for compiled
-// plans (see runtime/lib/execution_plan.cpp). No version field yet;
-// Phase 1 plans are flat and we bump a version constant when we add
-// nested structure (e.g. when compilation-cache keys land in Task 14).
+// Top-level plan: a name, a schema version, the artifact table, and the
+// live collections. Version 2 adds the artifact table; version 1 plans
+// without artifacts are rejected by the scheduler.
 struct ExecutionPlan {
+    static constexpr uint32_t kCurrentVersion = 2;
+
+    uint32_t version = kCurrentVersion;
     std::string name;
+    std::vector<ArtifactDescriptor> artifacts;
     std::vector<TensorDefinition> tensors;
     std::vector<AllocationDefinition> allocations;
     std::vector<ExecutableNode> nodes;
@@ -113,8 +108,6 @@ void to_json(nlohmann::json& j, const TensorDefinition& t);
 void from_json(const nlohmann::json& j, TensorDefinition& t);
 void to_json(nlohmann::json& j, const AllocationDefinition& a);
 void from_json(const nlohmann::json& j, AllocationDefinition& a);
-void to_json(nlohmann::json& j, const LaunchParameters& l);
-void from_json(const nlohmann::json& j, LaunchParameters& l);
 void to_json(nlohmann::json& j, const ExecutableNode& n);
 void from_json(const nlohmann::json& j, ExecutableNode& n);
 void to_json(nlohmann::json& j, const PlanInput& i);
@@ -123,5 +116,11 @@ void to_json(nlohmann::json& j, const PlanOutput& o);
 void from_json(const nlohmann::json& j, PlanOutput& o);
 void to_json(nlohmann::json& j, const ExecutionPlan& p);
 void from_json(const nlohmann::json& j, ExecutionPlan& p);
+
+// Validating reader. Returns an Error for an unsupported version, a
+// negative or malformed id, or a node that names a missing artifact.
+// `parse_plan_text` is the same check over a JSON string.
+Result<ExecutionPlan> parse_plan_json(const nlohmann::json& j);
+Result<ExecutionPlan> parse_plan_text(const std::string& text);
 
 }  // namespace forge_rt

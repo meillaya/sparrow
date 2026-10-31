@@ -1,4 +1,4 @@
-// ForgeStack Triton backend — Path A, CPU reference kernel (spec §7).
+// Sparrow Triton backend — Path A, CPU reference kernel (spec §7).
 //
 // Shipped scope: naive triple-loop in fp32 with bias + GELU fused.
 // No threading, no SIMD intrinsics — the kernel values correctness and

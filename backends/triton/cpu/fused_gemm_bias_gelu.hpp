@@ -1,6 +1,6 @@
 #pragma once
 
-// ForgeStack Triton backend — Path A, CPU reference kernel (spec §7).
+// Sparrow Triton backend — Path A, CPU reference kernel (spec §7).
 // This header is the *public* entry point used by `TritonProvider::launch`
 // to materialize a fused GEMM + bias + GELU on the host. The shipped
 // kernel is a naive triple-loop in fp32 with bias + GELU fused in the

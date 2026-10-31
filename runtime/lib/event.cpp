@@ -7,7 +7,7 @@
 namespace forge_rt {
 
 Result<void> Event::wait(std::chrono::milliseconds timeout) {
-    if (completed_) return Result<void>{};
+    if (completed()) return Result<void>{};
 
     if (timeout == std::chrono::milliseconds{0}) {
         return Error{"Event " + std::to_string(id_) + " not completed (timeout=0ms)", -1};
@@ -18,7 +18,7 @@ Result<void> Event::wait(std::chrono::milliseconds timeout) {
     // integration exercise end-to-end without GPU/HW dependencies.
     using clock = std::chrono::steady_clock;
     const auto deadline = clock::now() + timeout;
-    while (!completed_) {
+    while (!completed()) {
         if (clock::now() >= deadline) {
             return Error{"Event " + std::to_string(id_) + " timed out after " +
                              std::to_string(timeout.count()) + "ms",

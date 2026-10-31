@@ -1,7 +1,7 @@
 """End-to-end FusedMLP differential pytest (Phase 1, Task 13; Phase 2, Task 20).
 
 Builds the FusedMLP model, runs eager, runs through
-``torch.compile(backend="forgestack")``, asserts the validation result
+the ``forge_torch.compile`` wrapper, asserts the validation result
 passes for at least 3 random shapes (spec §19).
 
 Phase 2 / Wave 5 (Task 20) extends the shape coverage to 6 by adding
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+
 from forge_torch.backend import BACKEND, compile
 from forge_torch.conftest import FusedMLP
 from forge_torch.validation import validate
@@ -84,4 +85,4 @@ def test_fused_mlp_smoke_compile_callable_runs() -> None:
     assert "forge.graph" in compiled.mlir_text
     # Sanity: the backend name matches what ``torch.compile(backend=...)``
     # would receive.
-    assert BACKEND == "forgestack"
+    assert BACKEND == "sparrow"

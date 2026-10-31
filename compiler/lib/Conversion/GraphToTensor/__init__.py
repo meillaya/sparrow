@@ -36,7 +36,7 @@
 # is a no-op when fed already-lowered IR. This is exercised explicitly by
 # `compiler/test/Conversion/GraphToTensor/idempotent.mlir`.
 #
-# See `.omo/notepads/forgestack/learnings.md` §(h) for the gotchas hit
+# See the phase 7 notes for the gotchas hit
 # while wiring this up — most notably the StringAttr↔BoolAttr mismatch on
 # the `approximate` property and the assembler-format quirk where `attr-dict`
 # silently drops default-valued `BoolAttr` properties.

@@ -12,24 +12,44 @@ root shows exactly what the compiler emitted and why::
         fp16/
           dynamic_m/
             schedule_64x128x32/
-              artifact.json
-              kernel.bin
-              metrics.json
+              <hexdigest>/
+                artifact.json
 
 The :meth:`CacheKey.hexdigest` folds every tier (plus the compiler
-version) into a 16-hex-character SHA-256 prefix; two keys are equal
-iff their on-disk paths are equal. The hex digest is what the
-in-memory tier of :mod:`forge_torch.cache_store` keys on.
+version) into a 16-hex-character SHA-256 prefix. The digest is the
+final path component, so two keys that differ in any field never share
+a directory. The in-memory tier keys on the same digest.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from forge_torch._version import __version__ as COMPILER_VERSION
+
+# Cache path components come from user-controlled names such as ``target``
+# and ``arch``. Keep the readable tiers but never let a component escape
+# the cache root or collide after sanitising.
+_UNSAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def _safe_component(value: str) -> str:
+    """Return a path-safe form of ``value``, preserving readable names.
+
+    Components that change under sanitising, that are empty, or that name
+    a directory traversal get a short digest suffix so two different raw
+    values cannot collapse to the same path.
+    """
+    raw = value or "empty"
+    safe = _UNSAFE_COMPONENT.sub("_", raw)
+    if safe in {".", ".."} or safe != raw or not safe:
+        digest = hashlib.sha256(raw.encode()).hexdigest()[:8]
+        safe = f"{(safe or 'value').lstrip('.') or 'value'}-{digest}"
+    return safe
 
 
 @dataclass(frozen=True)
@@ -60,9 +80,17 @@ class CacheKey:
 
         Layout::
 
-            <root>/fused_mlp/<arch>/<dtype>/<shape_constraints>/<schedule>
+            <root>/fused_mlp/<arch>/<dtype>/<shape_constraints>/<schedule>/<hexdigest>
         """
-        return root / "fused_mlp" / self.arch / self.dtype / self.shape_constraints / self.schedule
+        return (
+            root
+            / "fused_mlp"
+            / _safe_component(self.arch)
+            / _safe_component(self.dtype)
+            / _safe_component(self.shape_constraints)
+            / _safe_component(self.schedule)
+            / self.hexdigest()
+        )
 
     def hexdigest(self) -> str:
         """Stable 16-hex-char digest over all key tiers + compiler version.

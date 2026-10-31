@@ -3,7 +3,7 @@
 Confirms the same FusedMLP — ``gelu(x @ w + b)`` — produces numerically
 identical output (within fp32 atol=1e-4) when run through:
 
-  * the ``forgestack.compile()`` (target="triton") path, which on
+  * the ``forge_torch.compile()`` (target="triton") path, which on
     Phase 1 backwards-compat dispatches through PyTorch eager
     ``torch.nn.functional.gelu`` — numerically equivalent to the
     Triton CPU kernel ``backends/triton/cpu/fused_gemm_bias_gelu``
@@ -29,8 +29,6 @@ import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
-from forge_torch.backend import compile
-from forge_torch.conftest import FusedMLP
 
 from backends.astra.sim.functional import (
     DRAM_BYTES,
@@ -40,6 +38,8 @@ from backends.astra.sim.functional import (
     run_functional,
 )
 from compiler.lib.Dialect.Astra.assembler import assemble
+from forge_torch.backend import compile
+from forge_torch.conftest import FusedMLP
 
 TILE_SHAPES = [
     # (M, K, N) — every dimension <= TILE so the tiled microcode

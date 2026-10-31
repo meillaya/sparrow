@@ -1,4 +1,4 @@
-"""fused_gemm_bias_gelu — Triton kernel template (ForgeStack Path A).
+"""fused_gemm_bias_gelu — Triton kernel template (Sparrow Path A).
 
 Computes:  Y = gelu(X @ W + B)
 
@@ -12,14 +12,14 @@ The kernel takes X [B, S, K] or [M, K], W [K, N], B [N] and returns Y of the
 same leading shape with last dim = N. Any-rank X is flattened to 2-D inside
 the wrapper and reshaped back on the way out (the kernel itself is 2-D).
 
-Spec reference: .omo/plans/forgestack.md §7 Path A.
+Reference: phase 1 plan §7 Path A.
 """
 
 from __future__ import annotations
 
 import torch
 import triton
-import triton.language as tl
+import triton.language as tl  # ty: ignore[unresolved-import]
 
 
 @triton.jit

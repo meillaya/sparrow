@@ -1,4 +1,4 @@
-"""ForgeStack Python frontend — ``torch.compile(backend="forgestack")`` hook."""
+"""Sparrow Python frontend package."""
 
 from __future__ import annotations
 

@@ -13,6 +13,8 @@
 //   * Does NOT expose the Triton internal IR — only a compiled-kernel
 //     handle (see jit.py) is returned.
 //   * launch calls into the C++ CPU reference kernel.
+#include <atomic>
+#include <cstdint>
 #include <span>
 
 #include "forge_rt/device_provider.hpp"
@@ -54,7 +56,7 @@ public:
 private:
     // Monotonic event-id source. Events are stubs; the id is only used
     // by Event::wait for diagnostic messages.
-    uint64_t next_event_id_ = 1;
+    std::atomic<uint64_t> next_event_id_{1};
 };
 
 }  // namespace forge_rt::providers

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""forge-opt — ForgeStack's xDSL-based MLIR driver.
+"""forge-opt — Sparrow's xDSL-based MLIR driver.
 
 Phase 1 (Task 5) supports:
 
@@ -331,7 +331,7 @@ ACTIONS = {
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="forge-opt",
-        description="ForgeStack xDSL dialect driver (Phase 1).",
+        description="Sparrow xDSL dialect driver (Phase 1).",
     )
     parser.add_argument(
         "input",

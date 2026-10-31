@@ -25,6 +25,7 @@ brittle to whitespace changes in ``render()``.
 from __future__ import annotations
 
 import torch
+
 from forge_torch.conftest import FusedMLP
 from forge_torch.report import CompilationReport
 
@@ -40,7 +41,7 @@ def _capture_report_via_patch(tmp_path) -> tuple[CompilationReport, object]:
 
     The compile() call uses a per-test tmp_path cache root and
     cache_store so the cold-path branch (which is the only path that
-    emits a report) fires reliably — the default ``.cache/forgestack``
+    emits a report) fires reliably — the default ``.cache/sparrow``
     is shared across tests and once warm, _emit_report is skipped.
     """
     from pathlib import Path
@@ -98,12 +99,11 @@ def test_report_has_mlir_op_count_per_pass(tmp_path) -> None:
     )
 
 
-def test_report_has_fusion_groups(tmp_path) -> None:
-    """spec §16: fusion_groups must be populated (≥ 1 for the FusedMLP triple)."""
+def test_report_does_not_invent_fusion_groups(tmp_path) -> None:
+    """The shipped compile path does not run the fuse pass, so the count is None."""
     report, _ = _capture_report_via_patch(tmp_path)
-    assert isinstance(report.fusion_groups, int)
-    assert report.fusion_groups >= 1, (
-        f"fusion_groups must be ≥ 1 for FusedMLP, got {report.fusion_groups}"
+    assert report.fusion_groups is None, (
+        f"fusion_groups must stay None until a pass measures it, got {report.fusion_groups!r}"
     )
 
 
@@ -117,13 +117,12 @@ def test_report_has_selected_target(tmp_path) -> None:
     )
 
 
-def test_report_has_alternative_target_costs(tmp_path) -> None:
-    """spec §16: alternative costs (Astra + FPGA) must be non-empty cost strings."""
+def test_report_does_not_invent_alternative_costs(tmp_path) -> None:
+    """No cost model runs at compile time, so alternative costs stay None."""
     report, _ = _capture_report_via_patch(tmp_path)
+    assert report.execution_path in {"eager", "native"}
     for field_name in ("alternative_astra_cost", "alternative_fpga_cost"):
-        value = getattr(report, field_name)
-        assert isinstance(value, str)
-        assert len(value) > 0, f"{field_name} must be non-empty, got {value!r}"
+        assert getattr(report, field_name) is None, field_name
 
 
 def test_report_schedule_has_all_tile_knobs(tmp_path) -> None:
@@ -144,87 +143,69 @@ def test_report_schedule_has_all_tile_knobs(tmp_path) -> None:
 
 
 def test_report_has_peak_intermediate_memory(tmp_path) -> None:
-    """spec §16: both original + planned intermediate memory must be > 0."""
+    """No plan is built at compile time, so memory fields are unavailable."""
     report, _ = _capture_report_via_patch(tmp_path)
-    assert report.original_intermediate_memory_mb > 0.0, (
-        f"original_intermediate_memory_mb must be > 0, got {report.original_intermediate_memory_mb}"
-    )
-    assert report.planned_intermediate_memory_mb > 0.0, (
-        f"planned_intermediate_memory_mb must be > 0, got {report.planned_intermediate_memory_mb}"
-    )
-    assert report.planned_intermediate_memory_mb <= report.original_intermediate_memory_mb, (
-        f"planned ({report.planned_intermediate_memory_mb}) must be <= "
-        f"original ({report.original_intermediate_memory_mb})"
-    )
+    assert report.original_intermediate_memory_mb is None
+    assert report.planned_intermediate_memory_mb is None
+    assert report.validation_max_error is None
+    assert report.execution_path in {"eager", "native"}
+    if report.execution_path == "native":
+        assert report.generated_kernels == 1
+    else:
+        assert report.generated_kernels is None
 
 
 def test_report_has_generated_kernels(tmp_path) -> None:
-    """spec §16: generated_kernels must be ≥ 1 (the single fused_gemm_bias_gelu kernel)."""
+    """The count is 1 on the native path and None on the eager path."""
     report, _ = _capture_report_via_patch(tmp_path)
-    assert isinstance(report.generated_kernels, int)
-    assert report.generated_kernels >= 1, (
-        f"generated_kernels must be ≥ 1, got {report.generated_kernels}"
-    )
+    assert report.generated_kernels in {None, 1}
+    if report.execution_path == "native":
+        assert report.generated_kernels == 1
+    else:
+        assert report.generated_kernels is None
 
 
 def test_report_has_validation_max_error(tmp_path) -> None:
-    """spec §16: validation_max_error must be present (a float, populated by validate())."""
+    """Validation runs after compilation, so the report carries None at emit time."""
     report, _ = _capture_report_via_patch(tmp_path)
-    assert isinstance(report.validation_max_error, float)
-    assert report.validation_max_error >= 0.0, (
-        f"validation_max_error must be ≥ 0, got {report.validation_max_error}"
-    )
+    assert report.validation_max_error is None
 
 
 def test_report_full_completeness_single_check(tmp_path) -> None:
-    """Composite: every spec §16 field is present + non-empty in one assertion.
-
-    Reads each dataclass field via :func:`getattr` and asserts the
-    value is not None and (for strings) non-empty. Acts as the spec
-    §16 smoke gate that all the per-field tests above also pin
-    individually.
-    """
+    """The report separates measured fields from fields that are not measured."""
     report, compiled = _capture_report_via_patch(tmp_path)
 
-    required_strings = {
+    measured_strings = {
         "model_name": "FusedMLP",
         "selected_target": "triton",
-        "alternative_astra_cost": None,
-        "alternative_fpga_cost": None,
     }
-    for field_name, expected in required_strings.items():
+    for field_name, expected in measured_strings.items():
         value = getattr(report, field_name)
-        assert value is not None, f"{field_name} must not be None"
-        assert isinstance(value, str), f"{field_name} must be str, got {type(value).__name__}"
-        assert len(value) > 0, f"{field_name} must be non-empty"
-        if expected is not None:
-            assert value == expected, f"{field_name} expected {expected!r}, got {value!r}"
+        assert value == expected, f"{field_name} expected {expected!r}, got {value!r}"
 
-    required_ints = {
-        "captured_fx_nodes": (1, None),
-        "imported_mlir_operations": (1, None),
-        "operations_after_canonicalize": (1, None),
-        "fusion_groups": (1, None),
-        "generated_kernels": (1, None),
+    assert report.execution_path in {"eager", "native"}
+    for field_name in ("alternative_astra_cost", "alternative_fpga_cost"):
+        assert getattr(report, field_name) is None, field_name
+
+    measured_ints = {
+        "captured_fx_nodes": 1,
+        "imported_mlir_operations": 1,
+        "operations_after_canonicalize": 1,
     }
-    for field_name, (lo, hi) in required_ints.items():
+    for field_name, lo in measured_ints.items():
         value = getattr(report, field_name)
         assert isinstance(value, int), f"{field_name} must be int, got {type(value).__name__}"
         assert value >= lo, f"{field_name} must be ≥ {lo}, got {value}"
-        if hi is not None:
-            assert value <= hi, f"{field_name} must be ≤ {hi}, got {value}"
 
-    required_floats = {
-        "original_intermediate_memory_mb": (0.0, None),
-        "planned_intermediate_memory_mb": (0.0, None),
-        "validation_max_error": (0.0, None),
-    }
-    for field_name, (lo, hi) in required_floats.items():
-        value = getattr(report, field_name)
-        assert isinstance(value, float), f"{field_name} must be float, got {type(value).__name__}"
-        assert value >= lo, f"{field_name} must be ≥ {lo}, got {value}"
-        if hi is not None:
-            assert value <= hi, f"{field_name} must be ≤ {hi}, got {value}"
+    assert report.fusion_groups is None
+    assert report.generated_kernels in {None, 1}
+
+    for field_name in (
+        "original_intermediate_memory_mb",
+        "planned_intermediate_memory_mb",
+        "validation_max_error",
+    ):
+        assert getattr(report, field_name) is None, field_name
 
     schedule = report.schedule
     for key in ("tile_m", "tile_n", "tile_k", "warps", "stages"):
