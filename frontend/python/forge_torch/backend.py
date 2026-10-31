@@ -326,7 +326,7 @@ class CompiledFusedMLP:
         else:
             self.execution = "eager"
 
-    def __call__(self, *args: torch.Tensor) -> torch.Tensor:
+    def __call__(self, *args: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, ...]:
         if self._native_runner is not None and len(args) == 3:
             x, weight, bias = args
             if (
@@ -369,6 +369,8 @@ class CompiledFusedMLP:
         """
         eager_out = self.model(*self.example_inputs)
         compiled_out = self(*self.example_inputs)
+        if isinstance(compiled_out, tuple):
+            raise TypeError("validate() supports single-output graphs")
         diff = (eager_out - compiled_out).abs()
         max_error = float(diff.max().item()) if diff.numel() else 0.0
         if self.report is not None:

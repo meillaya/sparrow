@@ -6,13 +6,16 @@
 <br>
 <br>
 
-Sparrow is a PyTorch-to-MLIR compiler and C++ runtime for three CPU backends.
+Sparrow is a PyTorch-to-MLIR compiler and C++ runtime for CPU backends and a
+reference CPU executor.
 It is a research-scale stack for compiler and runtime engineers who need to
 read every layer.
 
-Version 0.2.0 is a baseline. The frontend imports and caches graphs and returns
-an eager callable by default. A native fused-MLP path runs through ForgeRT when
-the pybind11 module is built. General graphs do not get a runtime plan yet.
+Version 0.2.0 is a baseline. The frontend imports and caches graphs, lowers
+supported tensor graphs to an execution plan, and runs that plan through
+ForgeRT when the pybind11 module is built. The fused MLP keeps a native fast
+path. Graphs outside the CPU kernel registry fall back to eager and record why
+in `planning_error`.
 [docs/SPEC.md](docs/SPEC.md) states each contract and marks each one met,
 partial, or gap; [docs/AUDIT.md](docs/AUDIT.md) records the evidence and the
 remediation order.
@@ -64,21 +67,24 @@ shape (2, 8, 256) lowered False
 model, and the import, cache, and report steps still run. Build the optional
 native module (`cmake -B build -S . -G Ninja && cmake --build build`, then set
 `PYTHONPATH=build/python`) to run this fused MLP through the C++ kernel and get
-`lowered True`. The kernel is a naive triple loop, so large shapes fall back to
+`lowered True`. With the module built, a supported non-fused graph also lowers
+to a CPU plan and runs through the scheduler; `planning_error` is empty for that
+path. The kernel is a naive triple loop, so large shapes fall back to
 eager.
 
 ## Backends
 
 | Backend | Implemented | Limit |
 | --- | --- | --- |
+| CPU reference | fp32 kernels for gemm, add, GELU, softmax, layer norm, attention, reshape | Static shapes; naive loops |
 | Triton-CPU | fp32 fused GEMM, bias, and GELU C++ kernel, provider | 2D input, one output |
 | Astra-sim | 64-bit microcode ISA, assembler, functional and timing simulators, provider | 16x16 tile; codegen is not usable |
 | MicroGPU-sim | 16-bit SIMT ISA, assembler, interpreter, provider | No lowering pass; one input |
 
-The registry is narrowed to ops with a dialect definition. The compiler
-lowering map is empty, so `partition()` raises instead of assigning a region it
-cannot lower. The native bridge covers the fused MLP on Triton-CPU; general
-graphs run eager.
+The partitioner registry is narrowed to ops with a dialect definition. Its
+lowering map is still empty, so `partition()` raises instead of assigning a
+region it cannot lower. General execution uses the MLIR plan builder and the CPU
+reference provider. The fused MLP keeps the native Triton-CPU kernel.
 
 ## Architecture
 
@@ -96,9 +102,11 @@ ForgeRT takes an execution plan, computes liveness and buffer reuse, orders the
 nodes, and dispatches each launch to a provider. The providers are Host-only
 and synchronous.
 
-The frontend builds a one-node execution plan for the fused MLP slice. General
-graphs do not get one, so the two figures describe one design whose halves meet
-only for that slice. The specification marks the rest as gaps.
+The frontend builds a multi-node execution plan for supported tensor graphs and
+runs it through the scheduler. The fused MLP takes a one-node native path. Astra
+and MicroGPU still have no compiler lowering, so the two figures describe one
+design whose halves meet only for the supported CPU path. The specification
+marks the rest as gaps.
 
 ## Checks
 
