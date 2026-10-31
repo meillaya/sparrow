@@ -90,6 +90,14 @@ class FxImporter:
     # ------------------------------------------------------------------
 
     def import_graph(self, gm: GraphModule) -> str:
+        """Import ``gm`` and return textual MLIR."""
+        module = self.import_module(gm)
+        buf = io.StringIO()
+        Printer(stream=buf).print_op(module)
+        return buf.getvalue()
+
+    def import_module(self, gm: GraphModule) -> ModuleOp:
+        """Import ``gm`` and return the verified xDSL module."""
         graph = gm.graph if hasattr(gm, "graph") else gm
         node_types: dict[str, object] = self._infer_node_types(graph)
 
@@ -149,10 +157,7 @@ class FxImporter:
         func.verify()
         module = ModuleOp([func])
         module.verify()
-
-        buf = io.StringIO()
-        Printer(stream=buf).print_op(module)
-        return buf.getvalue()
+        return module
 
     # ------------------------------------------------------------------
     # Type inference (pass 1)
