@@ -58,8 +58,8 @@ _NATIVE_MAX_MULTIPLY_ADDS: Final = 1 << 27
 # the same work budget so a canonical-shape test does not stall for minutes.
 _PLAN_MAX_MULTIPLY_ADDS: Final = 1 << 27
 
-# Report output path. It lives under the ignored cache root because the
-# report is diagnostic output, not a tracked artifact.
+# Explicit opt-in report path used by callers that want a durable report.
+# compile() never writes a global report implicitly.
 REPORT_PATH = Path(".cache/sparrow/reports/phase1-report.txt")
 
 # ---------------------------------------------------------------------------
@@ -150,6 +150,7 @@ def compile(
     *,
     cache_store: CacheStore | None = None,
     target: str = "triton",
+    report_path: str | Path | None = None,
 ) -> CompiledFusedMLP:
     """Import a PyTorch model, cache its MLIR, and return a callable.
 
@@ -226,7 +227,8 @@ def compile(
                 else (len(built_plan.plan["nodes"]) if built_plan is not None else None)
             ),
         )
-        _emit_report(report)
+        if report_path is not None:
+            _emit_report(report, Path(report_path))
 
     return CompiledFusedMLP(
         model,
@@ -250,6 +252,7 @@ def compile_graph(
     *,
     cache_store: CacheStore | None = None,
     target: str = "triton",
+    report_path: str | Path | None = None,
 ) -> CompiledFusedMLP:
     """Compile an already-captured FX graph.
 
@@ -257,7 +260,13 @@ def compile_graph(
     into graph placeholders by Dynamo. Re-tracing a GraphModule preserves
     those placeholders, so the general compile path handles it.
     """
-    return compile(gm, example_inputs, cache_store=cache_store, target=target)
+    return compile(
+        gm,
+        example_inputs,
+        cache_store=cache_store,
+        target=target,
+        report_path=report_path,
+    )
 
 
 def compile_fused_mlp(
@@ -606,14 +615,15 @@ def _build_report(
     )
 
 
-def _emit_report(report: CompilationReport) -> None:
-    """Write the rendered report to :data:`REPORT_PATH`.
+def _emit_report(report: CompilationReport, path: Path) -> None:
+    """Write the rendered report to ``path``.
 
-    Called on cache miss only — the spec says the report must be emitted
-    once per unique cache key, not on every ``compile()`` call.
+    Called on cache miss only, and only when the caller passed
+    ``report_path``. The report object is always attached to the
+    compiled callable.
     """
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(report.render() + "\n")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report.render() + "\n")
 
 
 def _native_runner_for(

@@ -52,7 +52,7 @@ def _capture_report_via_patch(tmp_path) -> tuple[CompilationReport, object]:
 
     captured: list[CompilationReport] = []
 
-    def _capture(report: CompilationReport) -> None:
+    def _capture(report: CompilationReport, _path) -> None:
         captured.append(report)
 
     cache_root: Path = tmp_path / "cache"
@@ -64,7 +64,12 @@ def _capture_report_via_patch(tmp_path) -> tuple[CompilationReport, object]:
         x = torch.randn(2, 16, 128, dtype=torch.float32)
         w = torch.randn(128, 256, dtype=torch.float32)
         b = torch.randn(256, dtype=torch.float32)
-        compiled = compile(model, [x, w, b], cache_store=store)
+        compiled = compile(
+            model,
+            [x, w, b],
+            cache_store=store,
+            report_path=tmp_path / "report.txt",
+        )
 
     assert len(captured) == 1, f"expected 1 emitted report, got {len(captured)}"
     return captured[0], compiled

@@ -510,10 +510,13 @@ Astra backend or general heterogeneous execution.
 | Fixed | AUD-14 | M3 lifts `get_attr` parameters and lowers `nn.Linear` / `nn.LayerNorm` `call_module` nodes |
 | Fixed | AUD-15, AUD-16 | M4 derives cycle tables from the simulators, gives CPU real costs, and fixes the reshape cost mapping |
 | Fixed | AUD-37 | M4 makes `compile_partitioned` run the config-A CPU plan and raise for unlowered B/C |
-| Open | AUD-24, AUD-26 | Package path rename, pins |
+| Mitigated | AUD-24 | `sparrow_torch` and `sparrow_rt` shims cover the old names; the repository rename is not forced |
+| Fixed | AUD-26 | `uv.lock` committed, nixpkgs pinned, `shell.nix` hashed |
 | Fixed | AUD-33 | M3 canonical `OpSpec` table shared by importer, region, partitioner, and capability check |
 | Open | AUD-34, AUD-38 | Test gaps, provider shapes |
-| Open | AUD-40, AUD-41, AUD-43 through AUD-46 | Sanitizers, duplicate result types, dead code, stale comments, report durability |
+| Fixed | AUD-46 | `compile(report_path=...)` writes a caller-chosen durable path |
+| Mitigated | AUD-40 | ASan, UBSan, and TSan jobs exist; coverage and benchmarks remain |
+| Open | AUD-41, AUD-43 through AUD-45 | Duplicate result types, dead code, stale comments |
 | Mitigated | AUD-54, AUD-58 | Astra v2 uses a binary artifact with real offsets and attributes; the legacy TensorToAstra round trip stays lossy and disabled |
 | Mitigated | AUD-57 | MicroGPU v2 adds fp32 arithmetic and a 4x4 matmul; SIGMOID rounding and DAG edge shape remain |
 | Open | AUD-55, AUD-56 | Compiler test depth, DCE scope |
@@ -545,3 +548,9 @@ opcode, and the binary artifact executor: 49 ctest cases, 36 lit tests, and
 The M6 follow-up widened MicroGPU to a 32-bit word, added MATMUL and float
 elementwise opcodes, and added TensorToMicroGPU: 49 ctest cases, 36 lit tests,
 and 311 pytest cases (1 skipped for missing Triton), with ruff and ty passing.
+
+The M7 follow-up added explicit report paths, sanitizer builds (ASan, UBSan,
+TSan), `uv.lock` and nix pins, compatibility shims, and the 0.3.0 version:
+49 ctest cases, 36 lit tests, and 313 pytest cases (1 skipped for missing
+Triton), with ruff and ty passing. `scripts/ci-sanitizers.sh` passed all three
+sanitizer builds.

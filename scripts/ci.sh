@@ -54,4 +54,10 @@ echo "[ci] Step 5: ty type check"
 ty check . --python "$PYTHON"
 echo
 
+if [[ "${SPARROW_SANITIZERS:-0}" == "1" ]]; then
+    echo "[ci] Step 6: sanitizer builds"
+    bash scripts/ci-sanitizers.sh
+    echo
+fi
+
 echo "[ci] === ALL GATES PASSED ==="

@@ -1,4 +1,7 @@
-{ pkgs ? import (fetchTarball "https://github.com/NixOS/nixpkgs/archive/61b7c44c4073f0b827768aff0049561b5110ea5a.tar.gz") {} }:
+{ pkgs ? import (fetchTarball {
+    url = "https://github.com/NixOS/nixpkgs/archive/61b7c44c4073f0b827768aff0049561b5110ea5a.tar.gz";
+    sha256 = "1knbr9j7szzlppbp0r9rby06nml7b45vqhmskgycfbcnr1nanqnp";
+  }) {} }:
 pkgs.mkShell {
   packages = with pkgs; [
     cmake ninja gnumake pkg-config

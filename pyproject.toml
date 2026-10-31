@@ -3,7 +3,7 @@
 # Toolchain (2026-07-18): uv for env/deps, ruff for lint+format, ty for types.
 [project]
 name = "sparrow"
-version = "0.2.0"
+version = "0.3.0"
 description = "Sparrow: a PyTorch-to-xDSL compiler and C++ runtime for CPU backends"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
@@ -48,7 +48,7 @@ sparrow = "forge_torch.dynamo:backend"
 
 [tool.setuptools.packages.find]
 where = [".", "frontend/python"]
-include = ["compiler.lib*", "backends*", "forge_torch*"]
+include = ["compiler.lib*", "backends*", "forge_torch*", "sparrow_torch*", "sparrow_rt*"]
 namespaces = true
 
 # ---------------------------------------------------------------------------
@@ -62,6 +62,7 @@ line-length = 100
 extend-exclude = [
     ".venv",
     "build",
+    "build-*",
     "cmake-build-*",
     ".devenv",
     ".omo/evidence",

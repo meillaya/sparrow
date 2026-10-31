@@ -1,8 +1,7 @@
 # Sparrow roadmap
 
 The audit and [SPEC.md](SPEC.md) describe the contracts. This file tracks the
-remaining milestones from the completion plan. M1 through M6 are implemented;
-M7 is open.
+remaining milestones from the completion plan. M1 through M7 are implemented.
 
 ## Landed
 
@@ -85,16 +84,21 @@ M7 is open.
 - Acceptance: compiler-generated elementwise and 4x4 GEMM programs match
   eager.
 
-## Open
-
 ### M7: release hygiene
 
-- Add `report_path` to `compile`; stop writing the global cache report.
-- Add ASan and UBSan CMake options and CI jobs, plus a TSan job for the event
-  and provider paths.
-- Commit `uv.lock`, pin nixpkgs, and hash `shell.nix`.
-- Add `sparrow_torch` and `sparrow_rt` compatibility shims.
-- Bump the version and update SPEC and AUDIT when the surface changes.
+- `compile(..., report_path=...)` writes the report only when asked; there is
+  no implicit global report file.
+- CMake exposes `SPARROW_SANITIZE_ADDRESS`, `SPARROW_SANITIZE_UNDEFINED`, and
+  `SPARROW_SANITIZE_THREAD`; `scripts/ci-sanitizers.sh` runs ASan, UBSan, and a
+  TSan job covering the event and provider paths.
+- `uv.lock` is committed, `devenv.yaml` pins nixpkgs, and `shell.nix` carries
+  the tarball hash.
+- `sparrow_torch` and `sparrow_rt` re-export the current names.
+- The version is 0.3.0 and SPEC/AUDIT describe the shipped surface.
+
+## Open
+
+None. The milestones above are the completion plan.
 
 ## Gates
 

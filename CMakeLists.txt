@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 project(sparrow
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "MLIR-based heterogeneous ML compiler and runtime (Phase 1 vertical slice)"
     LANGUAGES CXX
 )
@@ -13,6 +13,27 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Warnings. `-Werror` is applied to our own targets below, not to
 # FetchContent dependencies such as googletest.
 add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
+
+# Optional sanitizers. Address and thread sanitizers are mutually
+# exclusive; undefined-behavior checking can be combined with address.
+option(SPARROW_SANITIZE_ADDRESS "Build with AddressSanitizer" OFF)
+option(SPARROW_SANITIZE_UNDEFINED "Build with UndefinedBehaviorSanitizer" OFF)
+option(SPARROW_SANITIZE_THREAD "Build with ThreadSanitizer" OFF)
+if(SPARROW_SANITIZE_ADDRESS AND SPARROW_SANITIZE_THREAD)
+    message(FATAL_ERROR "SPARROW_SANITIZE_ADDRESS and SPARROW_SANITIZE_THREAD are mutually exclusive")
+endif()
+if(SPARROW_SANITIZE_ADDRESS)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address)
+endif()
+if(SPARROW_SANITIZE_UNDEFINED)
+    add_compile_options(-fsanitize=undefined -fno-sanitize-recover=undefined)
+    add_link_options(-fsanitize=undefined)
+endif()
+if(SPARROW_SANITIZE_THREAD)
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=thread)
+endif()
 
 # Testing — GoogleTest via CMake's FetchContent (works without system gtest)
 include(CTest)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from forge_torch._version import __version__
 from forge_torch.backend import (
     BACKEND,
     CompiledFusedMLP,
@@ -24,6 +25,7 @@ __all__ = [
     "CompiledFusedMLP",
     "CompiledGraph",
     "DynamicCompiledFusedMLP",
+    "__version__",
     "compile",
     "compile_fused_mlp",
     "compile_graph",

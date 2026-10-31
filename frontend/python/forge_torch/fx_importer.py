@@ -376,7 +376,12 @@ class FxImporter:
         meta_type = self._tensor_type(node)
         if meta_type is not None:
             return meta_type
-        spec = spec_for_method(str(node.target))
+        try:
+            spec = spec_for_method(str(node.target))
+        except KeyError as exc:
+            raise NotImplementedError(
+                f"call_method {node.target!r} is not lowered by the Sparrow importer"
+            ) from exc
         operands = [node_types[name] for name in self._operand_names(node)]
         return self._infer_spec_type(spec, node, operands, f"method.{node.target}")
 

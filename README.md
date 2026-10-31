@@ -11,11 +11,13 @@ reference CPU executor.
 It is a research-scale stack for compiler and runtime engineers who need to
 read every layer.
 
-Version 0.2.0 is a baseline. The frontend imports and caches graphs (including
+Version 0.3.0 is the current baseline. The frontend imports and caches graphs (including
 ordinary `nn.Linear` parameters, lifted into plan inputs), lowers supported
 tensor graphs to an execution plan, and runs that plan through ForgeRT when the
 pybind11 module is built. The fused MLP keeps a native fast path. Graphs outside
 the CPU kernel registry fall back to eager and record why in `planning_error`.
+Pass `report_path=...` to `compile` to write the report; without it no report
+file is produced.
 [docs/SPEC.md](docs/SPEC.md) states each contract and marks each one met,
 partial, or gap; [docs/AUDIT.md](docs/AUDIT.md) records the evidence and the
 remediation order.
