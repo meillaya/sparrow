@@ -37,28 +37,27 @@ using forge_rt::providers::MicroGpuProvider;
 
 namespace {
 
-// Build the 16-bit bytecode stream for the reverse-copy microcode
-// program. The wire layout is little-endian: byte 0 is the low nibble
-// of the instruction word, byte 1 is the high nibble.
+// Build the 32-bit bytecode stream for the reverse-copy program. The
+// wire layout is little-endian: four bytes per instruction word.
 //
-// Opcode layout (high nibble = opcode, then dst, src, imm):
+// Opcode layout (4-bit opcode, 6-bit dst, 6-bit src, 16-bit imm):
 //   LOAD_GLOBAL  = 0x1   STORE_GLOBAL = 0x2   RETURN = 0x0
 std::vector<std::byte> reverse_copy_program() {
-    auto word_bytes = [](std::uint16_t word) {
+    auto word_bytes = [](std::uint32_t word) {
         return std::vector<std::byte>{
             static_cast<std::byte>(word & 0xFF),
             static_cast<std::byte>((word >> 8) & 0xFF),
+            static_cast<std::byte>((word >> 16) & 0xFF),
+            static_cast<std::byte>((word >> 24) & 0xFF),
         };
     };
-    auto load = [&](std::uint8_t dst, std::uint8_t addr) {
-        return word_bytes(static_cast<std::uint16_t>(
-            (0x1u << 12) | (dst << 8) | (addr & 0xF)));
+    auto load = [&](std::uint32_t dst, std::uint32_t addr) {
+        return word_bytes((0x1u << 28) | (dst << 22) | addr);
     };
-    auto store = [&](std::uint8_t src, std::uint8_t addr) {
-        return word_bytes(static_cast<std::uint16_t>(
-            (0x2u << 12) | (src << 4) | (addr & 0xF)));
+    auto store = [&](std::uint32_t src, std::uint32_t addr) {
+        return word_bytes((0x2u << 28) | (src << 16) | addr);
     };
-    auto ret = [&]() { return word_bytes(0x0000); };
+    auto ret = [&]() { return word_bytes(0x00000000u); };
 
     std::vector<std::byte> program;
     auto append = [&](const std::vector<std::byte>& chunk) {

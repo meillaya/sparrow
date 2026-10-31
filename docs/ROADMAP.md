@@ -1,8 +1,8 @@
 # Sparrow roadmap
 
 The audit and [SPEC.md](SPEC.md) describe the contracts. This file tracks the
-remaining milestones from the completion plan. M1 through M5 are implemented;
-M6 and M7 are open.
+remaining milestones from the completion plan. M1 through M6 are implemented;
+M7 is open.
 
 ## Landed
 
@@ -73,16 +73,19 @@ M6 and M7 are open.
 - Acceptance: compiler-generated 16x16 tiles match eager for K=4, K=20, and
   K=512 with bias and GELU.
 
-## Open
-
 ### M6: MicroGPU v2
 
-- Widen the instruction to 32 bits so addresses exceed 16 words.
-- Add a dot or matmul instruction.
-- Add `TensorToMicroGPU` for elementwise ops and small GEMMs.
-- Keep reductions unsupported until the ISA has loops.
+- The instruction word is 32 bits (`opcode:4 | dst:6 | src:6 | imm:16`), so
+  addresses cover 65,536 words instead of 16 and the register field covers the
+  full 32-slot file.
+- `MATMUL` computes a 4x4x4 tile from a base word address; `FADD`, `FMUL`, and
+  `FRELU` add float elementwise operations alongside the integer core.
+- `TensorToMicroGPU` lowers one small elementwise op or one 4x4 GEMM per module
+  and keeps reductions unsupported until the ISA has loops.
 - Acceptance: compiler-generated elementwise and 4x4 GEMM programs match
   eager.
+
+## Open
 
 ### M7: release hygiene
 

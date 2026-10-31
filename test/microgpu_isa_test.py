@@ -31,20 +31,20 @@ def test_encode_decode_round_trip(opcode: OpCode, dst: int, src: int, imm: int) 
     word = encode(opcode, dst, src, imm=imm)
 
     assert decode(word) == MicroOp(opcode, dst, src, imm)
-    assert 0 <= word < (1 << 16)
+    assert 0 <= word < (1 << 32)
 
 
 @pytest.mark.parametrize(
     ("field", "expected_message"),
     [
-        ("dst", "dst must fit in 4 bits"),
-        ("src", "src must fit in 4 bits"),
-        ("imm", "imm must fit in 4 bits"),
+        ("dst", "dst must fit in 6 bits"),
+        ("src", "src must fit in 6 bits"),
+        ("imm", "imm must fit in 16 bits"),
     ],
 )
 def test_encode_rejects_out_of_range_fields(field: str, expected_message: str) -> None:
-    """Given a 5-bit value, encoding rejects it as too wide for the 4-bit field."""
-    sentinel = 0x10  # first value that does not fit in 4 bits
+    """Given an over-wide value, encoding rejects it."""
+    sentinel = 0x40  # first value that does not fit in 6 bits
     match field:
         case "dst":
             with pytest.raises(ValueError, match=expected_message):
@@ -54,25 +54,25 @@ def test_encode_rejects_out_of_range_fields(field: str, expected_message: str) -
                 _ = encode(OpCode.NOP, 0, sentinel)
         case "imm":
             with pytest.raises(ValueError, match=expected_message):
-                _ = encode(OpCode.NOP, 0, 0, imm=sentinel)
+                _ = encode(OpCode.NOP, 0, 0, imm=1 << 16)
         case _:
             pytest.fail(f"unexpected field {field!r}")
 
 
 def test_decode_rejects_unknown_opcode() -> None:
     """Given a word whose high nibble is unmapped, decode raises."""
-    word = (0x6 << 12) | (0x1 << 8) | (0x2 << 4) | 0x3
-    with pytest.raises(ValueError, match="unknown MicroGPU wire opcode 0x6"):
+    word = (0xA << 28) | (0x1 << 22) | (0x2 << 16) | 0x3
+    with pytest.raises(ValueError, match="unknown MicroGPU wire opcode 0xa"):
         _ = decode(word)
 
 
 def test_decode_rejects_oversized_word() -> None:
-    """Given a word > 16 bits, decode raises rather than silently truncating."""
-    with pytest.raises(ValueError, match="must fit in 16 bits"):
-        _ = decode(1 << 16)
+    """Given a word > 32 bits, decode raises rather than silently truncating."""
+    with pytest.raises(ValueError, match="must fit in 32 bits"):
+        _ = decode(1 << 32)
 
 
-def test_all_seven_opcodes_round_trip() -> None:
+def test_all_opcodes_round_trip() -> None:
     """Each shipped opcode has a stable numeric value (no reordering).
 
     The wire format is part of the ABI; a regression here means the
@@ -87,6 +87,10 @@ def test_all_seven_opcodes_round_trip() -> None:
         OpCode.ADD: 0x03,
         OpCode.MUL: 0x04,
         OpCode.SIGMOID: 0x05,
+        OpCode.MATMUL: 0x06,
+        OpCode.FADD: 0x07,
+        OpCode.FMUL: 0x08,
+        OpCode.FRELU: 0x09,
         OpCode.NOP: 0xFF,
     }
     for opcode, value in expected.items():

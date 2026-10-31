@@ -79,7 +79,7 @@ eager.
 | CPU reference | fp32 kernels for gemm, add, mul, relu, GELU, softmax, layer norm, attention, transpose, select, reshape | Static shapes; naive loops |
 | Triton-CPU | fp32 fused GEMM, bias, and GELU C++ kernel, provider | 2D input, one output |
 | Astra-sim | 64-bit microcode ISA with K tiling and vector add, layout/artifact builder, binary executor, functional and timing simulators | One 16x16 tile per program |
-| MicroGPU-sim | 16-bit SIMT ISA, assembler, interpreter, provider | No lowering pass; one input |
+| MicroGPU-sim | 32-bit SIMT ISA with float ops and a 4x4 matmul, TensorToMicroGPU, assembler, interpreter, provider | One small op or 4x4 GEMM per module |
 
 The partitioner registry is narrowed to ops with a dialect definition. The
 compiler lowering map covers the CPU plan and the fused Triton group; Astra and

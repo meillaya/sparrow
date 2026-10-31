@@ -515,7 +515,8 @@ Astra backend or general heterogeneous execution.
 | Open | AUD-34, AUD-38 | Test gaps, provider shapes |
 | Open | AUD-40, AUD-41, AUD-43 through AUD-46 | Sanitizers, duplicate result types, dead code, stale comments, report durability |
 | Mitigated | AUD-54, AUD-58 | Astra v2 uses a binary artifact with real offsets and attributes; the legacy TensorToAstra round trip stays lossy and disabled |
-| Open | AUD-55, AUD-56, AUD-57 | Compiler test depth, DCE scope, MicroGPU numerics |
+| Mitigated | AUD-57 | MicroGPU v2 adds fp32 arithmetic and a 4x4 matmul; SIGMOID rounding and DAG edge shape remain |
+| Open | AUD-55, AUD-56 | Compiler test depth, DCE scope |
 
 ## Limits of this audit
 
@@ -540,3 +541,7 @@ Triton), with ruff and ty passing.
 The M5 follow-up added Astra v2 layout, DMA chunking, K tiling, the vector-add
 opcode, and the binary artifact executor: 49 ctest cases, 36 lit tests, and
 306 pytest cases (1 skipped for missing Triton), with ruff and ty passing.
+
+The M6 follow-up widened MicroGPU to a 32-bit word, added MATMUL and float
+elementwise opcodes, and added TensorToMicroGPU: 49 ctest cases, 36 lit tests,
+and 311 pytest cases (1 skipped for missing Triton), with ruff and ty passing.

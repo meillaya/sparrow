@@ -168,7 +168,7 @@ from backends.microgpu.interp import (
 )
 
 spec = json.loads(sys.stdin.read())
-words = [int(w) & 0xFFFF for w in spec["words"]]
+words = [int(w) & 0xFFFFFFFF for w in spec["words"]]
 input_b64 = spec.get("input", "")
 output_elements = int(spec.get("output_elements", 1))
 
@@ -319,12 +319,11 @@ Result<Event> MicroGpuProvider::launch(const ArtifactDescriptor& artifact,
     }
 
     // Build the bytecode word list. The artifact.binary carries the
-    // packed 16-bit words as little-endian bytes (two bytes per
-    // word). Reject malformed artifacts before forking.
-    if ((artifact.binary.size() % 2) != 0) {
+    // packed 32-bit words as little-endian bytes (four bytes per word).
+    if ((artifact.binary.size() % 4) != 0) {
         return Error{
-            "MicroGpuProvider::launch: artifact.binary size must be even "
-            "(16-bit word stream), got " +
+            "MicroGpuProvider::launch: artifact.binary size must be a multiple "
+            "of 4 (32-bit word stream), got " +
                 std::to_string(artifact.binary.size()),
             2223};
     }
@@ -332,11 +331,13 @@ Result<Event> MicroGpuProvider::launch(const ArtifactDescriptor& artifact,
     words_json << "[";
     bool first = true;
     for (std::size_t offset = 0; offset < artifact.binary.size();
-         offset += 2) {
-        const auto lo = std::to_integer<std::uint16_t>(artifact.binary[offset]);
-        const auto hi = std::to_integer<std::uint16_t>(artifact.binary[offset + 1]);
-        const std::uint16_t word =
-            static_cast<std::uint16_t>(lo | (hi << 8));
+         offset += 4) {
+        std::uint32_t word = 0;
+        for (std::size_t byte = 0; byte < 4; ++byte) {
+            word |= static_cast<std::uint32_t>(
+                        std::to_integer<std::uint32_t>(artifact.binary[offset + byte]))
+                    << (8 * byte);
+        }
         if (!first) words_json << ",";
         first = false;
         words_json << word;

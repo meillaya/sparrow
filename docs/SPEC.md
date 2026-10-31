@@ -579,21 +579,26 @@ compiler pass remains disabled and raises a message pointing at
 
 ### 6.4 MicroGPU-sim
 
-MicroGPU is a single-warp SIMT model. An instruction is 16 bits, packed as four
-4-bit fields: `opcode | dst | src | imm`. The opcodes are `RETURN=0x00`,
+MicroGPU is a single-warp SIMT model. Version 2 instructions are 32 bits,
+packed as `opcode:4 | dst:6 | src:6 | imm:16`. The opcodes are `RETURN=0x00`,
 `LOAD_GLOBAL=0x01`, `STORE_GLOBAL=0x02`, `ADD=0x03`, `MUL=0x04`,
-`SIGMOID=0x05`, and `NOP=0xFF`. `NOP` is encoded on the wire as `0x0F` so it
-fits the 4-bit field.
+`SIGMOID=0x05`, `MATMUL=0x06`, `FADD=0x07`, `FMUL=0x08`, `FRELU=0x09`, and
+`NOP=0xFF` (wire `0x0F`). The 16-bit immediate addresses up to 65,536 words,
+and the 6-bit register fields cover the 32-slot register file.
+
+`MATMUL base` computes a 4x4 fp32 tile: A at word `base`, B at `base+16`, C at
+`base+32`. `FADD`, `FMUL`, and `FRELU` interpret their registers as fp32 bit
+patterns. The integer `ADD`/`MUL` keep their i32 semantics.
 
 The interpreter has 32 registers, 4-byte words, a flat memory, WAR and WAW
 warnings, and an out-of-bounds exception. It returns an `InterpreterState` with
-the register file and a dependency DAG. The arithmetic has defects: `SIGMOID`
-rounds its result to 0 or 1, `ADD` and `MUL` wrap as unsigned while loads are
-signed, and the DAG omits the destination read for `ADD` and `MUL`.
+the register file and a dependency DAG. `SIGMOID` still rounds to 0 or 1, and
+the DAG keeps the historical integer-edge shape; those defects are tracked
+separately.
 
-There is no `TensorToMicroGPU` conversion. The dialect, assembler, interpreter,
-and provider exist, but no pass turns `forge.tensor` operations into
-`microgpu` operations.
+`compiler.lib.Conversion.TensorToMicroGPU` lowers one elementwise op (up to 16
+elements) or one 4x4 GEMM per module to a MicroGPU program. Reductions are
+rejected until the ISA grows loops.
 
 ### 6.5 CPU reference
 
@@ -635,7 +640,7 @@ the output arrays, aliases the caller inputs, and runs the scheduler.
 | SPA-BE-07 | MUST | An unsupported dtype or shape return an `Error`, not a crash or a partial write | Met |
 | SPA-BE-08 | MUST | Simulators produce the same result for the same program and inputs | Met |
 | SPA-BE-09 | MUST | Codegen consume IR values and attributes, not textual regex matches | Met for CPU and Astra |
-| SPA-BE-10 | MUST | The MicroGPU backend have a tensor-to-microgpu conversion | Gap (AUD-36) |
+| SPA-BE-10 | MUST | The MicroGPU backend have a tensor-to-microgpu conversion | Met for elementwise and 4x4 GEMM |
 
 ## 7. Runtime
 

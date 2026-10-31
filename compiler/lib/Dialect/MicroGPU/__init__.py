@@ -3,7 +3,7 @@
 # `microgpu` xDSL dialect — Phase 8 / Task 73.
 #
 # The MicroGPU dialect is the high-level IR for the single-warp SIMT
-# backend (spec §11). Each op lowers to one 16-bit MicroGPU instruction
+# backend (spec §11). Each op lowers to one 32-bit MicroGPU instruction
 # word (see :mod:`backends.microgpu.isa`); the dialect therefore stays
 # narrow and carries no lowering logic of its own — codegen is the
 # assembler's job (Task 72), and the runtime provider wraps the

@@ -3,7 +3,7 @@
 The microgpu backend exposes a single-warp SIMT bytecode interpreter
 running on the host. The package is split into:
 
-* :mod:`backends.microgpu.isa` — typed 16-bit opcode enum + encode/decode.
+* :mod:`backends.microgpu.isa` — typed 32-bit opcode enum + encode/decode.
 * :mod:`backends.microgpu.asm` — text-format assembler + disassembler,
   plus the dialect ↔ bytecode round-trip used by the codegen pass.
 * :mod:`backends.microgpu.interp` — Python reference interpreter with

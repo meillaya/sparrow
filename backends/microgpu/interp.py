@@ -33,6 +33,7 @@ Reference: spec §11.
 from __future__ import annotations
 
 import math
+import struct
 import warnings
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -267,6 +268,34 @@ def run(
                 regs[instr.dst] = (regs[instr.dst] * regs[instr.src]) & 0xFFFFFFFF
                 if detect_races:
                     reg_writes.add(instr.dst)
+            case OpCode.FADD | OpCode.FMUL:
+                _check_register(instr.dst, f"{instr.opcode.name} dst")
+                _check_register(instr.src, f"{instr.opcode.name} src")
+                left = struct.unpack("<f", struct.pack("<I", regs[instr.dst] & 0xFFFFFFFF))[0]
+                right = struct.unpack("<f", struct.pack("<I", regs[instr.src] & 0xFFFFFFFF))[0]
+                result = left + right if instr.opcode is OpCode.FADD else left * right
+                regs[instr.dst] = struct.unpack("<I", struct.pack("<f", result))[0]
+            case OpCode.FRELU:
+                _check_register(instr.dst, "FRELU dst")
+                value = struct.unpack("<f", struct.pack("<I", regs[instr.dst] & 0xFFFFFFFF))[0]
+                regs[instr.dst] = struct.unpack("<I", struct.pack("<f", max(0.0, value)))[0]
+            case OpCode.MATMUL:
+                base = instr.imm * BYTES_PER_WORD
+                _check_oob("MATMUL", base + 47 * BYTES_PER_WORD, len(memory))
+                values = []
+                for index in range(48):
+                    offset = base + index * BYTES_PER_WORD
+                    values.append(struct.unpack("<f", memory[offset : offset + BYTES_PER_WORD])[0])
+                lhs = values[0:16]
+                rhs = values[16:32]
+                product = [
+                    sum(lhs[row * 4 + inner] * rhs[inner * 4 + col] for inner in range(4))
+                    for row in range(4)
+                    for col in range(4)
+                ]
+                for index, value in enumerate(product):
+                    offset = base + (32 + index) * BYTES_PER_WORD
+                    memory[offset : offset + BYTES_PER_WORD] = struct.pack("<f", value)
             case OpCode.SIGMOID:
                 _check_register(instr.dst, "SIGMOID dst")
                 if detect_races:
@@ -320,6 +349,27 @@ def _instruction_deps(word: int, index: int) -> DepNode:
                 name="SIGMOID",
                 reg_reads=(instr.dst,),
                 reg_writes=(instr.dst,),
+            )
+        case OpCode.FADD | OpCode.FMUL:
+            return DepNode(
+                index=index,
+                name=instr.opcode.name,
+                reg_reads=(instr.dst, instr.src),
+                reg_writes=(instr.dst,),
+            )
+        case OpCode.FRELU:
+            return DepNode(
+                index=index,
+                name="FRELU",
+                reg_reads=(instr.dst,),
+                reg_writes=(instr.dst,),
+            )
+        case OpCode.MATMUL:
+            return DepNode(
+                index=index,
+                name="MATMUL",
+                mem_reads=tuple(range(instr.imm, instr.imm + 32)),
+                mem_writes=tuple(range(instr.imm + 32, instr.imm + 48)),
             )
         case OpCode.RETURN:
             return DepNode(index=index, name="RETURN")

@@ -14,7 +14,7 @@ from backends.microgpu.asm import (
 from backends.microgpu.isa import OpCode, decode, encode
 
 TEXT_CASES: list[tuple[str, int]] = [
-    # (text, expected 16-bit word)
+    # (text, expected 32-bit word)
     ("LOAD_GLOBAL  r0, [0x1]", encode(OpCode.LOAD_GLOBAL, 0, 0, imm=0x1)),
     ("LOAD_GLOBAL  r1, [0x2]", encode(OpCode.LOAD_GLOBAL, 1, 0, imm=0x2)),
     ("STORE_GLOBAL r3, [0x4]", encode(OpCode.STORE_GLOBAL, 0, 3, imm=0x4)),
@@ -60,15 +60,15 @@ def test_assemble_ignores_blank_lines_and_comments() -> None:
 
 
 def test_assemble_rejects_malformed_register() -> None:
-    """Given a register slot > 15, assembly reports the line number."""
-    with pytest.raises(ValueError, match=r"line 1.*register 'r16'"):
-        _ = assemble("ADD  r16, r0")
+    """Given a register slot outside the 32-slot file, assembly reports the line."""
+    with pytest.raises(ValueError, match=r"line 1.*register 'r32'"):
+        _ = assemble("ADD  r32, r0")
 
 
 def test_assemble_rejects_malformed_address() -> None:
     """Given an out-of-range address, assembly reports the line number."""
-    with pytest.raises(ValueError, match=r"line 1.*address '\[0x100\]'"):
-        _ = assemble("LOAD_GLOBAL  r0, [0x100]")
+    with pytest.raises(ValueError, match=r"line 1.*address '\[0x10000\]'"):
+        _ = assemble("LOAD_GLOBAL  r0, [0x10000]")
 
 
 def test_assemble_rejects_unknown_opcode() -> None:
@@ -116,12 +116,12 @@ def test_disassemble_emits_canonical_layout() -> None:
 
 def test_disassemble_rejects_unknown_wire_opcode() -> None:
     """Given a word with an unmapped wire opcode, disassemble raises."""
-    bad_word = (0x6 << 12) | (0x1 << 8) | (0x2 << 4) | 0x3
+    bad_word = (0xA << 28) | (0x1 << 22) | (0x2 << 16) | 0x3
     with pytest.raises(ValueError, match="unknown MicroGPU wire opcode"):
         _ = disassemble([bad_word])
 
 
-def test_all_seven_opcodes_have_text_round_trip() -> None:
+def test_all_opcodes_have_text_round_trip() -> None:
     """Every shipped opcode emits the expected decoded fields."""
     cases = [
         (encode(OpCode.LOAD_GLOBAL, 0, 0, imm=0x5), OpCode.LOAD_GLOBAL, 0, 0, 0x5),
@@ -129,6 +129,10 @@ def test_all_seven_opcodes_have_text_round_trip() -> None:
         (encode(OpCode.ADD, 2, 3, imm=0), OpCode.ADD, 2, 3, 0),
         (encode(OpCode.MUL, 2, 3, imm=0), OpCode.MUL, 2, 3, 0),
         (encode(OpCode.SIGMOID, 4, 0, imm=0), OpCode.SIGMOID, 4, 0, 0),
+        (encode(OpCode.MATMUL, 0, 0, imm=32), OpCode.MATMUL, 0, 0, 32),
+        (encode(OpCode.FADD, 1, 2, imm=0), OpCode.FADD, 1, 2, 0),
+        (encode(OpCode.FMUL, 1, 2, imm=0), OpCode.FMUL, 1, 2, 0),
+        (encode(OpCode.FRELU, 1, 0, imm=0), OpCode.FRELU, 1, 0, 0),
         (encode(OpCode.RETURN, 0, 0, imm=0), OpCode.RETURN, 0, 0, 0),
         (encode(OpCode.NOP, 0, 0, imm=0), OpCode.NOP, 0, 0, 0),
     ]

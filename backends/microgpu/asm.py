@@ -40,7 +40,18 @@ _REGISTER_RE: Final[re.Pattern[str]] = re.compile(r"^r(?P<num>[0-9]+)$")
 _MEMORY_RE: Final[re.Pattern[str]] = re.compile(r"^\[(?P<addr>0[xX][0-9a-fA-F]+|[0-9]+)\]$")
 
 
-MicrogpuOpName = Literal["load_global", "store_global", "add", "mul", "sigmoid", "return"]
+MicrogpuOpName = Literal[
+    "load_global",
+    "store_global",
+    "add",
+    "mul",
+    "sigmoid",
+    "matmul",
+    "fadd",
+    "fmul",
+    "frelu",
+    "return",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,18 +93,16 @@ def _parse_register(token: str, line_number: int) -> int:
     if match is None:
         raise _line_error(line_number, f"expected register like r0..r15, got {token!r}")
     number = int(match.group("num"))
-    if number < 0 or number > 0xF:
-        raise _line_error(line_number, f"register {token!r} does not fit in 4 bits")
+    if number < 0 or number > 0x1F:
+        raise _line_error(line_number, f"register {token!r} does not fit the 32-slot file")
     return number
 
 
 def _parse_address(token: str, line_number: int) -> int:
     """Parse a bracketed memory operand (``[0x1000]``) into an integer address.
 
-    The wire-format immediate field is only 4 bits wide, so addresses
-    are constrained to ``[0, 15]``. Larger programs should treat the
-    immediate as a base-offset pair (out of scope for the shipped
-    single-warp model).
+    The 32-bit word carries a 16-bit address, so a program may address
+    up to 65,536 words (256 KiB).
     """
     match = _MEMORY_RE.fullmatch(token)
     if match is None:
@@ -102,8 +111,8 @@ def _parse_address(token: str, line_number: int) -> int:
         address = int(match.group("addr"), 0)
     except ValueError as exc:
         raise _line_error(line_number, f"address must be an integer, got {token!r}") from exc
-    if address < 0 or address > 0xF:
-        raise _line_error(line_number, f"address {token!r} does not fit in 4-bit immediate")
+    if address < 0 or address > 0xFFFF:
+        raise _line_error(line_number, f"address {token!r} does not fit in 16-bit immediate")
     return address
 
 
@@ -164,14 +173,31 @@ def _parse_instruction(line: str, line_number: int) -> int:
             dst = _parse_register(operands[0], line_number)
             src = _parse_register(operands[1], line_number)
             return encode(opcode, dst, src, imm=0)
-        case OpCode.SIGMOID:
+        case OpCode.SIGMOID | OpCode.FRELU:
             if len(operands) != 1:
                 raise _line_error(
                     line_number,
-                    f"SIGMOID expects 1 operand (dst), got {operands!r}",
+                    f"{opcode.name} expects 1 operand (dst), got {operands!r}",
                 )
             dst = _parse_register(operands[0], line_number)
             return encode(opcode, dst, 0, imm=0)
+        case OpCode.FADD | OpCode.FMUL:
+            if len(operands) != 2:
+                raise _line_error(
+                    line_number,
+                    f"{opcode.name} expects 2 operands (dst, src), got {operands!r}",
+                )
+            dst = _parse_register(operands[0], line_number)
+            src = _parse_register(operands[1], line_number)
+            return encode(opcode, dst, src, imm=0)
+        case OpCode.MATMUL:
+            if len(operands) != 1:
+                raise _line_error(
+                    line_number,
+                    f"MATMUL expects 1 operand ([base]), got {operands!r}",
+                )
+            base = _parse_address(operands[0], line_number)
+            return encode(opcode, 0, 0, imm=base)
 
 
 def assemble(text: str) -> list[int]:
@@ -227,6 +253,14 @@ def disassemble(words: Sequence[int]) -> str:
                 lines.append(f"MUL  {_format_register(instr.dst)}, {_format_register(instr.src)}")
             case OpCode.SIGMOID:
                 lines.append(f"SIGMOID {_format_register(instr.dst)}")
+            case OpCode.FADD:
+                lines.append(f"FADD {_format_register(instr.dst)}, {_format_register(instr.src)}")
+            case OpCode.FMUL:
+                lines.append(f"FMUL {_format_register(instr.dst)}, {_format_register(instr.src)}")
+            case OpCode.FRELU:
+                lines.append(f"FRELU {_format_register(instr.dst)}")
+            case OpCode.MATMUL:
+                lines.append(f"MATMUL {_format_address(instr.imm)}")
     return "\n".join(lines)
 
 
@@ -247,6 +281,14 @@ def _encode_microgpu_op(op: MicrogpuOp) -> int:
             return encode(OpCode.MUL, op.dst, op.src, imm=0)
         case "sigmoid":
             return encode(OpCode.SIGMOID, op.dst, 0, imm=0)
+        case "fadd":
+            return encode(OpCode.FADD, op.dst, op.src, imm=0)
+        case "fmul":
+            return encode(OpCode.FMUL, op.dst, op.src, imm=0)
+        case "frelu":
+            return encode(OpCode.FRELU, op.dst, 0, imm=0)
+        case "matmul":
+            return encode(OpCode.MATMUL, 0, 0, imm=op.imm)
         case "return":
             return encode(OpCode.RETURN, 0, 0, imm=0)
         case _:
@@ -272,6 +314,14 @@ def _decode_microgpu_op(word: int) -> MicrogpuOp:
             return MicrogpuOp(name="mul", dst=instr.dst, src=instr.src)
         case OpCode.SIGMOID:
             return MicrogpuOp(name="sigmoid", dst=instr.dst)
+        case OpCode.FADD:
+            return MicrogpuOp(name="fadd", dst=instr.dst, src=instr.src)
+        case OpCode.FMUL:
+            return MicrogpuOp(name="fmul", dst=instr.dst, src=instr.src)
+        case OpCode.FRELU:
+            return MicrogpuOp(name="frelu", dst=instr.dst)
+        case OpCode.MATMUL:
+            return MicrogpuOp(name="matmul", imm=instr.imm)
         case OpCode.RETURN:
             return MicrogpuOp(name="return")
         case OpCode.NOP:
