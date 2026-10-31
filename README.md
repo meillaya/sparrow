@@ -94,37 +94,6 @@ The frontend builds a one-node execution plan for the fused MLP slice. General
 graphs do not get one, so the two figures describe one design whose halves meet
 only for that slice. The specification marks the rest as gaps.
 
-## Repository layout
-
-```text
-sparrow/
-├── compiler/     xDSL dialects, conversions, transforms, forge-opt
-├── frontend/     forge_torch capture, import, cache, partition, report
-├── backends/     Triton-CPU, Astra-sim, MicroGPU-sim
-├── runtime/      ForgeRT ABI, planner, scheduler, providers
-├── models/       transformer block fixture
-├── test/         pytest suites
-├── scripts/      environment probe, setup, CI
-├── docs/         specification, audit, figures
-├── LICENSE
-└── pyproject.toml
-```
-
-The repository and documents use Sparrow. The Python package `forge_torch`, C++
-namespace `forge_rt`, and the compatibility CMake aliases keep historical
-names. Renaming import paths is a separate, breaking change.
-
-## Documentation
-
-- [docs/SPEC.md](docs/SPEC.md): system contracts, requirement status, and the
-  deviation register.
-- [docs/AUDIT.md](docs/AUDIT.md): findings with file and line evidence, plus a
-  remediation order.
-- [docs/figures/](docs/figures/): Excalidraw scenes, rendered PNGs, and the
-  generator that reproduces both.
-- [backend/CONTRIBUTING.md](backend/CONTRIBUTING.md): adding a backend,
-  provider, and lowering.
-
 ## Checks
 
 ```bash
@@ -136,7 +105,3 @@ The probe names every missing tool. The gate chains the C++ build and ctest,
 lit, pytest, ruff, and ty. It expects the environment from
 `scripts/setup-env.sh` and is not hermetic yet. Read
 [docs/AUDIT.md](docs/AUDIT.md) before relying on it.
-
-## License
-
-Apache-2.0. See [LICENSE](LICENSE).
