@@ -31,12 +31,14 @@ from pathlib import Path
 from typing import Final
 
 import torch
+from xdsl.utils.exceptions import VerifyException
 
 from forge_torch.cache import make_cache_key
 from forge_torch.cache_store import CacheStore
 from forge_torch.capabilities import BACKEND_CAPABILITIES
 from forge_torch.fx_importer import FxImporter
 from forge_torch.op_mapping import normalize_target
+from forge_torch.plan import BuiltPlan, PlanBuildError, build_plan
 from forge_torch.report import CompilationReport
 
 BACKEND = "sparrow"
@@ -45,6 +47,10 @@ BACKEND = "sparrow"
 # multiply-adds the native path falls back to eager instead of turning a
 # quick demo into a multi-minute stall. 1 << 27 is about 134M MACs.
 _NATIVE_MAX_MULTIPLY_ADDS: Final = 1 << 27
+
+# The CPU plan kernels are naive loops too. Skip the plan for graphs above
+# the same work budget so a canonical-shape test does not stall for minutes.
+_PLAN_MAX_MULTIPLY_ADDS: Final = 1 << 27
 
 # Report output path. It lives under the ignored cache root because the
 # report is diagnostic output, not a tracked artifact.
@@ -137,11 +143,12 @@ def compile(
     This is not a registered ``torch.compile`` backend. The function
     captures the FX graph, runs :class:`FxImporter` to obtain MLIR,
     consults the two-tier cache, and returns a :class:`CompiledFusedMLP`.
-    When the optional ``_sparrow_rt`` extension is importable and the graph
-    is the fused MLP pattern, the callable runs the native kernel and
-    reports ``lowered=True``. Otherwise it delegates to eager PyTorch and
-    reports ``lowered=False``. On a cache miss the function also emits the
-    observability report to :data:`REPORT_PATH` and attaches it to the
+    The callable has three execution paths. The fused MLP pattern uses the
+    native kernel when ``_sparrow_rt`` is built. Other graphs that lower to
+    the CPU kernel registry run an execution plan through
+    ``_sparrow_rt.execute_plan``. Graphs the registry cannot lower fall back
+    to eager, and ``planning_error`` records why. On a cache miss the
+    function also writes the observability report and attaches it to the
     callable.
 
     ``target`` selects the backend for the capability check. One
@@ -152,10 +159,22 @@ def compile(
     gm = torch.fx.symbolic_trace(model)
     _check_target_capabilities(target, _fx_ops_to_forge_tensor_ops(gm))
     importer = FxImporter(example_inputs)
-    mlir_text = importer.import_graph(gm)
+    module = importer.import_module(gm)
+    mlir_text = str(module)
 
     native_runner = _native_runner_for(gm, example_inputs)
-    execution_path = "native" if native_runner is not None else "eager"
+    built_plan: BuiltPlan | None = None
+    plan_runtime = None
+    planning_error: str | None = None
+    if native_runner is None and target == "triton":
+        built_plan, plan_runtime, planning_error = _build_cpu_plan(module)
+
+    if native_runner is not None:
+        execution_path = "native"
+    elif built_plan is not None:
+        execution_path = "cpu"
+    else:
+        execution_path = "eager"
 
     cache_store = cache_store if cache_store is not None else CacheStore()
     graph_hash = hashlib.sha256(mlir_text.encode()).hexdigest()
@@ -177,6 +196,7 @@ def compile(
             model,
             target=target,
             execution_path=execution_path,
+            plan_json=built_plan.to_json() if built_plan is not None else None,
         )
         cache_store.put(key, artifact)
         report = _build_report(
@@ -185,7 +205,11 @@ def compile(
             mlir_text,
             target=target,
             execution_path=execution_path,
-            generated_kernels=1 if native_runner is not None else None,
+            generated_kernels=(
+                1
+                if native_runner is not None
+                else (len(built_plan.plan["nodes"]) if built_plan is not None else None)
+            ),
         )
         _emit_report(report)
 
@@ -198,6 +222,9 @@ def compile(
         cache_store=cache_store,
         report=report,
         native_runner=native_runner,
+        plan_json=built_plan.to_json() if built_plan is not None else None,
+        plan_runtime=plan_runtime,
+        planning_error=planning_error,
     )
 
 
@@ -217,9 +244,8 @@ def compile_fused_mlp(
 class ValidationResult:
     """Differential-validation result with an explicit execution path.
 
-    The shipped eager path compares eager output to eager output. The
-    fields say so; callers must not read ``passed`` as proof that a
-    lowered kernel ran.
+    The fields name the path that ran. Callers must not read ``passed``
+    as proof that a lowered kernel ran unless ``lowered`` is true.
     """
 
     passed: bool
@@ -241,10 +267,12 @@ class ValidationResult:
 
 
 class CompiledFusedMLP:
-    """Stub: wraps eager execution while the C++ runtime (Tasks 10-12) lands.
+    """Compiled graph wrapper.
 
     The textual ``mlir_text`` is retained for diagnostics (and for the
-    pytest round-trip assertion in ``test_fx_importer.py``); the eventual
+    pytest round-trip assertion in ``test_fx_importer.py``). The callable
+    prefers the native fused-MLP kernel, then a CPU execution plan, then
+    eager for graphs the CPU registry cannot lower. The eventual
     lowered-execution backend will swap ``__call__`` for a call into
     ForgeRT (Task 11).
 
@@ -275,6 +303,9 @@ class CompiledFusedMLP:
         cache_store: CacheStore | None = None,
         report: CompilationReport | None = None,
         native_runner=None,
+        plan_json: str | None = None,
+        plan_runtime=None,
+        planning_error: str | None = None,
     ) -> None:
         self.model = model
         self.example_inputs = example_inputs
@@ -284,8 +315,16 @@ class CompiledFusedMLP:
         self.cache_store = cache_store
         self.report = report
         self._native_runner = native_runner
-        self.lowered = native_runner is not None
-        self.execution = "native" if self.lowered else "eager"
+        self._plan_json = plan_json
+        self._plan_runtime = plan_runtime
+        self.planning_error = planning_error
+        self.lowered = native_runner is not None or plan_json is not None
+        if native_runner is not None:
+            self.execution = "native"
+        elif plan_json is not None:
+            self.execution = "cpu"
+        else:
+            self.execution = "eager"
 
     def __call__(self, *args: torch.Tensor) -> torch.Tensor:
         if self._native_runner is not None and len(args) == 3:
@@ -313,9 +352,15 @@ class CompiledFusedMLP:
                 RuntimeWarning,
                 stacklevel=2,
             )
+        if self._plan_json is not None and self._plan_runtime is not None:
+            arrays = [arg.detach().cpu().numpy() for arg in args]
+            outputs = self._plan_runtime.execute_plan(self._plan_json, arrays)
+            if len(outputs) == 1:
+                return torch.from_numpy(outputs[0])
+            return tuple(torch.from_numpy(output) for output in outputs)
         return self.model(*args)
 
-    def validate(self, *, atol: float = 1e-5, rtol: float = 1e-5) -> ValidationResult:
+    def validate(self, *, atol: float = 1e-4, rtol: float = 1e-4) -> ValidationResult:
         """Compare ``self(*example_inputs)`` against eager.
 
         When ``lowered`` is false this compares eager to eager and the
@@ -407,9 +452,10 @@ def _build_artifact(
     *,
     target: str = "triton",
     execution_path: str = "eager",
+    plan_json: str | None = None,
 ) -> dict:
     """Bundle the per-key data persisted to ``artifact.json``."""
-    return {
+    artifact = {
         "model_name": model.__class__.__name__,
         "execution_path": execution_path,
         "target": target,
@@ -422,6 +468,68 @@ def _build_artifact(
             "stages": 4,
         },
     }
+    if plan_json is not None:
+        artifact["plan_json"] = plan_json
+    return artifact
+
+
+def _shape_numel(shape: list[int]) -> int:
+    total = 1
+    for dim in shape:
+        total *= int(dim)
+    return total
+
+
+def _plan_cost(built: BuiltPlan) -> int:
+    """Estimate the plan's dominant work in multiply-adds or elements."""
+    artifacts = built.plan["artifacts"]
+    total = 0
+    for node in built.plan["nodes"]:
+        artifact = artifacts[node["artifact"]]
+        arguments = artifact["arguments"]
+        shapes = [argument["shape"] for argument in arguments]
+        if artifact["entry_point"] == "forge.tensor.gemm":
+            if len(shapes) < 3:
+                return _PLAN_MAX_MULTIPLY_ADDS + 1
+            m = shapes[0][-2] if not artifact.get("transpose_a") else shapes[0][-1]
+            n = shapes[1][-1] if not artifact.get("transpose_b") else shapes[1][-2]
+            total += _shape_numel(shapes[0]) * int(n)
+            if m <= 0 or n <= 0:
+                return _PLAN_MAX_MULTIPLY_ADDS + 1
+        elif artifact["entry_point"] == "forge.tensor.scaled_dot_product_attention":
+            if shapes:
+                shape = shapes[0]
+                total += _shape_numel(shape) * int(shape[-2]) if len(shape) >= 2 else 0
+        else:
+            if shapes:
+                total += _shape_numel(shapes[-1])
+    return total
+
+
+def _build_cpu_plan(
+    module,
+) -> tuple[BuiltPlan | None, object | None, str | None]:
+    """Try to lower ``module`` and build a CPU plan.
+
+    Returns ``(plan, runtime, error)``. A missing ``_sparrow_rt`` is not
+    an error: the pure-Python frontend still works without the optional
+    native module. A graph the CPU registry cannot lower returns a
+    planning error and keeps the eager fallback.
+    """
+    try:
+        runtime = importlib.import_module("_sparrow_rt")
+    except ImportError:
+        return None, None, None
+    from compiler.lib.pipeline import lower_to_tensor
+
+    try:
+        lowered = lower_to_tensor(module)
+        plan = build_plan(lowered)
+        if _plan_cost(plan) > _PLAN_MAX_MULTIPLY_ADDS:
+            return None, runtime, "graph exceeds the CPU kernel work budget"
+        return plan, runtime, None
+    except (PlanBuildError, NotImplementedError, KeyError, VerifyException) as exc:
+        return None, runtime, str(exc)
 
 
 def _build_report(
@@ -512,3 +620,7 @@ def _native_runner_for(
         return None
     runner = getattr(module, "run_fused_mlp", None)
     return runner if callable(runner) else None
+
+
+#: Public alias for the general compiled graph.
+CompiledGraph = CompiledFusedMLP

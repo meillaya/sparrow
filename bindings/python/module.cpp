@@ -18,6 +18,7 @@
 #include "forge_rt/artifact_descriptor.hpp"
 #include "forge_rt/execution_plan.hpp"
 #include "forge_rt/scheduler.hpp"
+#include "forge_rt/providers/cpu_provider.hpp"
 #include "forge_rt/providers/triton_provider.hpp"
 
 namespace py = pybind11;
@@ -31,6 +32,10 @@ BufferSpec make_spec(const std::vector<int64_t>& shape, const std::size_t elemen
     spec.descriptor.shape = shape;
     spec.descriptor.memory_space = MemorySpace::Host;
     spec.descriptor.byte_offset = 0;
+    spec.descriptor.strides.assign(shape.size(), 1);
+    for (std::size_t i = shape.size(); i-- > 1;) {
+        spec.descriptor.strides[i - 1] = spec.descriptor.strides[i] * shape[i];
+    }
     spec.byte_size = elements * sizeof(float);
     spec.alignment = 64;
     return spec;
@@ -113,6 +118,109 @@ py::array_t<float> run_fused_mlp(py::array_t<float, py::array::c_style | py::arr
     return result_array;
 }
 
+const TensorDefinition& find_tensor(const ExecutionPlan& plan, TensorId id) {
+    for (const TensorDefinition& tensor : plan.tensors) {
+        if (tensor.id == id) return tensor;
+    }
+    throw py::value_error("execute_plan: plan references an unknown tensor id");
+}
+
+BufferSpec spec_for(const TensorDefinition& tensor, std::size_t elements) {
+    BufferSpec spec;
+    spec.descriptor.dtype = tensor.dtype;
+    spec.descriptor.shape = tensor.shape;
+    spec.descriptor.memory_space = tensor.memory_space;
+    spec.descriptor.byte_offset = 0;
+    spec.descriptor.strides.assign(tensor.shape.size(), 1);
+    for (std::size_t i = tensor.shape.size(); i-- > 1;) {
+        spec.descriptor.strides[i - 1] = spec.descriptor.strides[i] * tensor.shape[i];
+    }
+    spec.byte_size = elements * sizeof(float);
+    spec.alignment = 64;
+    return spec;
+}
+
+void check_array_shape(const py::array& array, const TensorDefinition& tensor) {
+    if (array.ndim() != static_cast<py::ssize_t>(tensor.shape.size())) {
+        throw py::value_error("execute_plan: input rank does not match the plan");
+    }
+    for (std::size_t i = 0; i < tensor.shape.size(); ++i) {
+        if (array.shape(static_cast<py::ssize_t>(i)) != tensor.shape[i]) {
+            throw py::value_error("execute_plan: input shape does not match the plan");
+        }
+    }
+}
+
+py::list execute_plan(const std::string& plan_json, py::list inputs) {
+    auto parsed = parse_plan_text(plan_json);
+    if (!parsed.ok()) {
+        throw py::value_error("execute_plan: " + parsed.error().message);
+    }
+    ExecutionPlan& plan = parsed.value();
+    if (plan.inputs.size() != static_cast<std::size_t>(inputs.size())) {
+        throw py::value_error("execute_plan: input count does not match the plan");
+    }
+    for (const ArtifactDescriptor& artifact : plan.artifacts) {
+        if (artifact.target != TargetKind::CPU) {
+            throw py::value_error(
+                "execute_plan: only CPU artifacts are supported by this binding");
+        }
+    }
+
+    std::vector<py::array_t<float, py::array::c_style | py::array::forcecast>> input_arrays;
+    input_arrays.reserve(plan.inputs.size());
+    std::vector<Buffer> input_buffers;
+    input_buffers.reserve(plan.inputs.size());
+    for (std::size_t i = 0; i < plan.inputs.size(); ++i) {
+        auto array = py::array_t<float, py::array::c_style | py::array::forcecast>::ensure(
+            inputs[static_cast<py::ssize_t>(i)]);
+        if (!array) {
+            throw py::value_error("execute_plan: inputs must be numeric arrays");
+        }
+        const TensorDefinition& tensor = find_tensor(plan, plan.inputs[i].tensor_id);
+        if (tensor.dtype != DataType::Float32) {
+            throw py::value_error("execute_plan: inputs must be fp32");
+        }
+        check_array_shape(array, tensor);
+        input_arrays.push_back(array);
+        BufferSpec spec = spec_for(tensor, static_cast<std::size_t>(array.size()));
+        input_buffers.emplace_back(array.mutable_data(), spec, /*owns=*/false);
+    }
+
+    std::vector<py::array_t<float>> output_arrays;
+    output_arrays.reserve(plan.outputs.size());
+    std::vector<Buffer> output_buffers;
+    output_buffers.reserve(plan.outputs.size());
+    for (const PlanOutput& output : plan.outputs) {
+        const TensorDefinition& tensor = find_tensor(plan, output.tensor_id);
+        if (tensor.dtype != DataType::Float32) {
+            throw py::value_error("execute_plan: outputs must be fp32");
+        }
+        std::vector<py::ssize_t> shape;
+        std::size_t elements = 1;
+        for (const int64_t dim : tensor.shape) {
+            shape.push_back(static_cast<py::ssize_t>(dim));
+            elements *= static_cast<std::size_t>(dim);
+        }
+        output_arrays.emplace_back(shape);
+        output_buffers.emplace_back(output_arrays.back().mutable_data(),
+                                    spec_for(tensor, elements), /*owns=*/false);
+    }
+
+    auto provider = std::make_shared<providers::CpuProvider>();
+    Scheduler scheduler({provider});
+    auto result = scheduler.execute(plan, input_buffers, output_buffers);
+    if (!result.ok()) {
+        throw std::runtime_error("execute_plan: " + result.error().message);
+    }
+
+    py::list outputs;
+    for (py::array_t<float>& array : output_arrays) {
+        outputs.append(std::move(array));
+    }
+    return outputs;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(_sparrow_rt, module) {
@@ -120,4 +228,7 @@ PYBIND11_MODULE(_sparrow_rt, module) {
     module.def("run_fused_mlp", &run_fused_mlp,
                "Run the fp32 fused MLP kernel through ForgeRT",
                py::arg("x"), py::arg("w"), py::arg("b"));
+    module.def("execute_plan", &execute_plan,
+               "Execute a version 2 CPU plan with the given input arrays",
+               py::arg("plan_json"), py::arg("inputs"));
 }
